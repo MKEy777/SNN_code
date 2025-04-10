@@ -8,16 +8,11 @@ from tqdm import tqdm
 from utils.load_dataset_deap import dataset_prepare
 from module.LIF import  SNNRateLayer, SurrogateGradientFunction
 
-
-import torch
-import torch.nn as nn
-from module.LIF import SNNRateLayer, SurrogateGradientFunction  # 假设这些模块已定义
-
 class SNN(nn.Module):
     def __init__(self, input_dim=32, hidden_dim=200, output_dim=2):
         super(SNN, self).__init__()
 
-        # 第一层参数，合并 tau_mem 和 tau_syn 为 tau
+        # 第一层参数
         self.layer1_params = {
             'thresh': 0.5,
             'tau': 10.0,  # 单一时间常数
@@ -30,7 +25,7 @@ class SNN(nn.Module):
             'learn_params': True
         }
         
-        # 第二层参数，合并 tau_mem 和 tau_syn 为 tau
+        # 第二层参数
         self.layer2_params = {
             'thresh': 1.0,
             'tau': 20.0,  # 单一时间常数
@@ -85,8 +80,6 @@ class SNN(nn.Module):
 # 训练函数
 def train(model, train_loader, optimizer, criterion, device, epochs=10):
     """
-    训练 SNN 模型，使用 tqdm 显示训练进度。
-    
     参数:
         model: SNN 模型实例
         train_loader: 训练数据的 DataLoader
@@ -148,7 +141,6 @@ def train(model, train_loader, optimizer, criterion, device, epochs=10):
 # 评估函数
 def evaluate(model, test_loader, criterion, device):
     """
-    在测试集上评估 SNN 模型。
     
     参数:
         model: SNN 模型实例
