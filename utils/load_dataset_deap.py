@@ -7,16 +7,16 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.model_selection import train_test_split
 
 ##############################################
-# ÀëÉ¢»¯ÇéÐ÷±êÇ©£ºÖ§³Ö2Àà¡¢3Àà¡¢4Àà
+# ç¦»æ•£åŒ–æƒ…ç»ªæ ‡ç­¾ï¼šæ”¯æŒ2ç±»ã€3ç±»ã€4ç±»
 ##############################################
 def labels_quantization(labels, num_classes):
     """
-    ½«Á¬ÐøÇéÐ÷±êÇ©ÀëÉ¢»¯
-    ²ÎÊý:
-        labels: Ô­Ê¼±êÇ©£¬ÐÎ×´ (Ñù±¾Êý, 2)
-        num_classes: ·ÖÀàÊý (2¡¢3»ò4)
-    ·µ»Ø:
-        ÀëÉ¢»¯ºóµÄ±êÇ©Êý×é
+    å°†è¿žç»­æƒ…ç»ªæ ‡ç­¾ç¦»æ•£åŒ–
+    å‚æ•°:
+        labels: åŽŸå§‹æ ‡ç­¾ï¼Œå½¢çŠ¶ (æ ·æœ¬æ•°, 2)
+        num_classes: åˆ†ç±»æ•° (2ã€3æˆ–4)
+    è¿”å›ž:
+        ç¦»æ•£åŒ–åŽçš„æ ‡ç­¾æ•°ç»„
     """
     if num_classes == 2:
         median_val = 5
@@ -41,7 +41,7 @@ def labels_quantization(labels, num_classes):
 
         return np.array([labels_val, labels_arousal])
 
-    else:  # 4Àà
+    else:  # 4ç±»
         median_val = 5
         labels_all = np.zeros(labels.shape[0])
         labels_all[(labels[:, 0] > median_val) & (labels[:, 1] <= median_val)] = 1
@@ -50,19 +50,19 @@ def labels_quantization(labels, num_classes):
         return labels_all
 
 ##############################################
-# ¼ÓÔØ²¢ÇÐÆ¬Êý¾Ý£¨´ø»ùÏßÐ£Õý£©
+# åŠ è½½å¹¶åˆ‡ç‰‡æ•°æ®ï¼ˆå¸¦åŸºçº¿æ ¡æ­£ï¼‰
 ##############################################
 def load_with_path(filepaths, label_type=[0, 2], only_phys=False, only_EEG=True, window_length_sec=4):
     """
-    ¼ÓÔØ¶à¸ö±»ÊÔÊý¾Ý²¢ÇÐÆ¬£¬°üº¬»ùÏßÐ£Õý
-    ²ÎÊý:
-        filepaths: Êý¾ÝÎÄ¼þÂ·¾¶ÁÐ±í
-        label_type: [±êÇ©Ë÷Òý (0: valence, 1: arousal), ·ÖÀàÊý]
-        only_phys / only_EEG: Ñ¡ÔñÉúÀíÐÅºÅ»òEEG
-        window_length_sec: ´°¿ÚÊ±³¤£¨Ãë£©
-    ·µ»Ø:
-        all_data: ÇÐÆ¬ºóµÄEEGÊý¾Ý (Ñù±¾Êý, Í¨µÀÊý, Ê±¼äµãÊý)
-        all_labels_final: ÀëÉ¢»¯±êÇ©
+    åŠ è½½å¤šä¸ªè¢«è¯•æ•°æ®å¹¶åˆ‡ç‰‡ï¼ŒåŒ…å«åŸºçº¿æ ¡æ­£
+    å‚æ•°:
+        filepaths: æ•°æ®æ–‡ä»¶è·¯å¾„åˆ—è¡¨
+        label_type: [æ ‡ç­¾ç´¢å¼• (0: valence, 1: arousal), åˆ†ç±»æ•°]
+        only_phys / only_EEG: é€‰æ‹©ç”Ÿç†ä¿¡å·æˆ–EEG
+        window_length_sec: çª—å£æ—¶é•¿ï¼ˆç§’ï¼‰
+    è¿”å›ž:
+        all_data: åˆ‡ç‰‡åŽçš„EEGæ•°æ® (æ ·æœ¬æ•°, é€šé“æ•°, æ—¶é—´ç‚¹æ•°)
+        all_labels_final: ç¦»æ•£åŒ–æ ‡ç­¾
     """
     all_data = []
     all_labels = []
@@ -73,22 +73,22 @@ def load_with_path(filepaths, label_type=[0, 2], only_phys=False, only_EEG=True,
         labels = loaddata['labels']
         data = loaddata['data'].astype(np.float32)
 
-        # Ñ¡ÔñÐÅºÅÀàÐÍ
+        # é€‰æ‹©ä¿¡å·ç±»åž‹
         if only_phys:
             data = data[:, 32:, :]
         elif only_EEG:
             data = data[:, :32, :]
 
-        # ÌáÈ¡Ç°3Ãë»ùÏßÊý¾Ý£¨128Hz * 3s = 384¸öÊ±¼äµã£©
+        # æå–å‰3ç§’åŸºçº¿æ•°æ®ï¼ˆ128Hz * 3s = 384ä¸ªæ—¶é—´ç‚¹ï¼‰
         baseline_data = data[:, :, :384]
 
-        # ¼ÆËãÃ¿¸ötrialºÍÃ¿¸öÍ¨µÀµÄ»ùÏß¾ùÖµ
+        # è®¡ç®—æ¯ä¸ªtrialå’Œæ¯ä¸ªé€šé“çš„åŸºçº¿å‡å€¼
         baseline_mean = np.mean(baseline_data, axis=2, keepdims=True)
 
-        # ¶ÔºóÐøÊý¾Ý½øÐÐ»ùÏßÐ£Õý
+        # å¯¹åŽç»­æ•°æ®è¿›è¡ŒåŸºçº¿æ ¡æ­£
         corrected_data = data[:, :, 384:] - baseline_mean
 
-        # ¹Ì¶¨´°¿ÚÇÐÆ¬
+        # å›ºå®šçª—å£åˆ‡ç‰‡
         sample_length = window_length_sec * 128
         num_samples = (corrected_data.shape[2] - sample_length) // sample_length + 1
 
@@ -109,7 +109,7 @@ def load_with_path(filepaths, label_type=[0, 2], only_phys=False, only_EEG=True,
     all_data = np.vstack(all_data)
     all_labels = np.vstack(all_labels)
 
-    # ±êÇ©ÀëÉ¢»¯´¦Àí
+    # æ ‡ç­¾ç¦»æ•£åŒ–å¤„ç†
     if label_type[1] == 1:
         processed_labels = labels_quantization(all_labels, 4)
     elif label_type[1] == 2:
@@ -119,7 +119,7 @@ def load_with_path(filepaths, label_type=[0, 2], only_phys=False, only_EEG=True,
     else:
         processed_labels = labels_quantization(all_labels, 4)
 
-    # ¸ù¾Ývalence»òarousalÑ¡Ôñ±êÇ©
+    # æ ¹æ®valenceæˆ–arousalé€‰æ‹©æ ‡ç­¾
     if processed_labels.ndim == 2:
         all_labels_final = processed_labels[label_type[0]].squeeze()
     else:
@@ -128,19 +128,19 @@ def load_with_path(filepaths, label_type=[0, 2], only_phys=False, only_EEG=True,
     return all_data, all_labels_final
 
 ##############################################
-# ¼ÓÔØDEAPÊý¾Ý
+# åŠ è½½DEAPæ•°æ®
 ##############################################
 def load_DEAP(data_dir, n_subjects=26, single_subject=False, load_all=False, only_phys=False, only_EEG=True,
               label_type=[0, 2], window_length_sec=4):
     """
-    ¼ÓÔØDEAPÊý¾Ý
-    ²ÎÊý:
-        data_dir: Êý¾ÝÎÄ¼þÄ¿Â¼
-        n_subjects: ÑµÁ·µÄ±»ÊÔÊý
-        single_subject: ÊÇ·ñµ¥¸ö±»ÊÔ
-        load_all: ÊÇ·ñ¼ÓÔØËùÓÐ±»ÊÔ
-    ·µ»Ø:
-        µ¥±»ÊÔ»òÈ«²¿±»ÊÔÊý¾Ý¼°±êÇ©£»»òÑµÁ·/²âÊÔÊý¾Ý¼¯
+    åŠ è½½DEAPæ•°æ®
+    å‚æ•°:
+        data_dir: æ•°æ®æ–‡ä»¶ç›®å½•
+        n_subjects: è®­ç»ƒçš„è¢«è¯•æ•°
+        single_subject: æ˜¯å¦å•ä¸ªè¢«è¯•
+        load_all: æ˜¯å¦åŠ è½½æ‰€æœ‰è¢«è¯•
+    è¿”å›ž:
+        å•è¢«è¯•æˆ–å…¨éƒ¨è¢«è¯•æ•°æ®åŠæ ‡ç­¾ï¼›æˆ–è®­ç»ƒ/æµ‹è¯•æ•°æ®é›†
     """
     filenames = os.listdir(data_dir)
     filepaths = [os.path.join(data_dir, f) for f in filenames]
@@ -157,7 +157,7 @@ def load_DEAP(data_dir, n_subjects=26, single_subject=False, load_all=False, onl
         train_data, train_labels = load_with_path(train_paths, label_type, only_phys, only_EEG, window_length_sec)
         return train_data, train_labels, train_names
 
-    # »®·ÖÑµÁ·ºÍ²âÊÔ
+    # åˆ’åˆ†è®­ç»ƒå’Œæµ‹è¯•
     filepaths, filenames = shuffle(filepaths, filenames, random_state=29)
     train_paths = filepaths[:n_subjects]
     test_paths = filepaths[n_subjects:]
@@ -172,16 +172,16 @@ def load_DEAP(data_dir, n_subjects=26, single_subject=False, load_all=False, onl
     return train_data, train_labels, train_names, test_data, test_labels, test_names
 
 ##############################################
-# ¹¹½¨PyTorch DataLoader
+# æž„å»ºPyTorch DataLoader
 ##############################################
 def dataset_prepare(window_length_sec=4, n_subjects=26, single_subject=False, load_all=False,
                     only_phys=False, only_EEG=True, label_type=[0, 2], data_dir="...",
                     batch_size=64, normalize=True):
     """
-    ×¼±¸ÑµÁ·/²âÊÔ¼¯ DataLoader
-    ²ÎÊý:
+    å‡†å¤‡è®­ç»ƒ/æµ‹è¯•é›† DataLoader
+    å‚æ•°:
         window_length_sec, n_subjects, single_subject, load_all, only_phys, only_EEG, label_type, data_dir, batch_size, normalize
-    ·µ»Ø:
+    è¿”å›ž:
         train_loader, test_loader
     """
     if single_subject:
@@ -199,7 +199,7 @@ def dataset_prepare(window_length_sec=4, n_subjects=26, single_subject=False, lo
         data = train_data
         labels = train_labels
 
-    # Èô¼ÓÔØËùÓÐÊý¾ÝÔò»®·ÖÑµÁ·/ÑéÖ¤¼¯
+    # è‹¥åŠ è½½æ‰€æœ‰æ•°æ®åˆ™åˆ’åˆ†è®­ç»ƒ/éªŒè¯é›†
     if load_all and not single_subject:
         train_data, test_data, train_labels, test_labels = train_test_split(
             data, labels, test_size=0.2, random_state=42, shuffle=True)
@@ -209,7 +209,7 @@ def dataset_prepare(window_length_sec=4, n_subjects=26, single_subject=False, lo
         train_labels = labels
         test_labels = None
 
-    # Z-score±ê×¼»¯
+    # Z-scoreæ ‡å‡†åŒ–
     def z_score_normalize(data_array):
         for i in range(data_array.shape[0]):
             sample = data_array[i]
@@ -224,12 +224,12 @@ def dataset_prepare(window_length_sec=4, n_subjects=26, single_subject=False, lo
         if test_data is not None:
             test_data = z_score_normalize(test_data)
 
-    # ×ª»»Êý¾ÝÐÎ×´Îª [Ñù±¾Êý, Ê±¼äµãÊý, Í¨µÀÊý]
+    # è½¬æ¢æ•°æ®å½¢çŠ¶ä¸º [æ ·æœ¬æ•°, æ—¶é—´ç‚¹æ•°, é€šé“æ•°]
     train_data = np.transpose(train_data, (0, 2, 1))
     if test_data is not None:
         test_data = np.transpose(test_data, (0, 2, 1))
 
-    # ¹¹½¨ DataLoader
+    # æž„å»º DataLoader
     train_dataset = TensorDataset(torch.Tensor(train_data), torch.LongTensor(train_labels))
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
@@ -246,7 +246,7 @@ def dataset_prepare(window_length_sec=4, n_subjects=26, single_subject=False, lo
     return train_loader, test_loader
 
 ##############################################
-# Ê¾Àýµ÷ÓÃ
+# ç¤ºä¾‹è°ƒç”¨
 ##############################################
 if __name__ == '__main__':
     data_dir = "C:\\Users\\VECTOR\\Desktop\\DeepLearning\\SNN_code\\dataset"
@@ -262,7 +262,7 @@ if __name__ == '__main__':
         normalize=True
     )
 
-    # ¼ì²éµÚÒ»¸öbatch
+    # æ£€æŸ¥ç¬¬ä¸€ä¸ªbatch
     for batch_idx, (data, target) in enumerate(train_loader):
         print(f"Batch {batch_idx}: Data shape: {data.shape}, Target shape: {target.shape}")
         break

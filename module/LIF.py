@@ -72,25 +72,25 @@ class LIFRateNeuronLayer(nn.Module):
         self.reset_mode = reset_mode
         self.grad_type = grad_type
 
-        # Ìí¼Ó×´Ì¬±äÁ¿
+        # æ·»åŠ çŠ¶æ€å˜é‡
         self.syn = None
         self.mem = None
 
     def forward(self, x):
         """
-        µ¥¸öÊ±¼ä²½µÄÇ°Ïò´«²¥
+        å•ä¸ªæ—¶é—´æ­¥çš„å‰å‘ä¼ æ’­
         x: [batch_size, num_neurons]
         """
-        # ¼ÆËã³£Êı
+        # è®¡ç®—å¸¸æ•°
         alpha_syn = torch.exp(-self.dt / self.tau_syn)
         alpha_mem = torch.exp(-self.dt / self.tau_mem)
         input_scale = (1 - alpha_syn) * self.tau_syn
 
-        # ¸üĞÂÍ»´¥ºÍÄ¤µçÎ»×´Ì¬
+        # æ›´æ–°çªè§¦å’Œè†œç”µä½çŠ¶æ€
         self.syn = alpha_syn * self.syn + input_scale * x
         self.mem = alpha_mem * self.mem + (1 - alpha_mem) * self.syn
 
-        # Éú³ÉÂö³å
+        # ç”Ÿæˆè„‰å†²
         spike = SurrogateGradientFunction.apply(
             self.mem - self.thresh,
             self.grad_type,
@@ -99,7 +99,7 @@ class LIFRateNeuronLayer(nn.Module):
             self.hight
         )
 
-        # ÖØÖÃÄ¤µçÎ»
+        # é‡ç½®è†œç”µä½
         if self.reset_mode == 'soft':
             self.mem = self.mem - spike * self.thresh
         else:
@@ -108,7 +108,7 @@ class LIFRateNeuronLayer(nn.Module):
         return spike, self.mem
 
     def set_neuron_state(self, batch_size, device):
-        """³õÊ¼»¯»òÖØÖÃÉñ¾­Ôª×´Ì¬"""
+        """åˆå§‹åŒ–æˆ–é‡ç½®ç¥ç»å…ƒçŠ¶æ€"""
         self.syn = torch.zeros(batch_size, self.num_neurons, device=device)
         self.mem = torch.zeros(batch_size, self.num_neurons, device=device)
 
@@ -121,17 +121,17 @@ class SNNRateLayer(nn.Module):
 
     def forward(self, x):
         """
-        µ¥¸öÊ±¼ä²½µÄÇ°Ïò´«²¥
+        å•ä¸ªæ—¶é—´æ­¥çš„å‰å‘ä¼ æ’­
         x: [batch_size, in_features]
         """
-        # ¼ÆËã´øÈ¨ÖØµÄÊäÈë
+        # è®¡ç®—å¸¦æƒé‡çš„è¾“å…¥
         weighted = torch.matmul(x, self.weight)  # [batch_size, out_features]
 
-        # Í¨¹ıLIFÉñ¾­Ôª´¦Àí
+        # é€šè¿‡LIFç¥ç»å…ƒå¤„ç†
         spike, mem = self.neurons(weighted)
 
         return spike, mem
 
     def set_neuron_state(self, batch_size, device):
-        """³õÊ¼»¯»òÖØÖÃ²ãµÄÉñ¾­Ôª×´Ì¬"""
+        """åˆå§‹åŒ–æˆ–é‡ç½®å±‚çš„ç¥ç»å…ƒçŠ¶æ€"""
         self.neurons.set_neuron_state(batch_size, device)
