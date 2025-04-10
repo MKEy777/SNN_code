@@ -47,9 +47,8 @@ class SurrogateGradientFunction(torch.autograd.Function):
 
         return grad_input * grad * gamma, None, None, None, None
 
-
 class LIFRateNeuronLayer(nn.Module):
-    def __init__(self, num_neurons, thresh=1.0, tau_mem=20.0, tau_syn=10.0,
+    def __init__(self, num_neurons, thresh=1.0, tau=20.0,
                  dt=1.0, reset_mode='soft', grad_type='triangular',
                  lens=0.5, gamma=1.0, hight=0.15, learn_params=True):
         super().__init__()
@@ -61,13 +60,11 @@ class LIFRateNeuronLayer(nn.Module):
         if learn_params:
             self.dt = nn.Parameter(torch.tensor(dt, dtype=torch.float32))
             self.thresh = nn.Parameter(torch.tensor([thresh], dtype=torch.float32))
-            self.tau_mem = nn.Parameter(torch.tensor([tau_mem], dtype=torch.float32))
-            self.tau_syn = nn.Parameter(torch.tensor([tau_syn], dtype=torch.float32))
+            self.tau = nn.Parameter(torch.tensor([tau], dtype=torch.float32))  # 合并为单一 tau
         else:
             self.register_buffer('dt', torch.tensor(dt, dtype=torch.float32))
             self.register_buffer('thresh', torch.tensor([thresh], dtype=torch.float32))
-            self.register_buffer('tau_mem', torch.tensor([tau_mem], dtype=torch.float32))
-            self.register_buffer('tau_syn', torch.tensor([tau_syn], dtype=torch.float32))
+            self.register_buffer('tau', torch.tensor([tau], dtype=torch.float32))  # 合并为单一 tau
 
         self.reset_mode = reset_mode
         self.grad_type = grad_type
@@ -81,14 +78,13 @@ class LIFRateNeuronLayer(nn.Module):
         单个时间步的前向传播
         x: [batch_size, num_neurons]
         """
-        # 计算常数
-        alpha_syn = torch.exp(-self.dt / self.tau_syn)
-        alpha_mem = torch.exp(-self.dt / self.tau_mem)
-        input_scale = (1 - alpha_syn) * self.tau_syn
+        # 计算常数，使用单一 tau
+        alpha = torch.exp(-self.dt / self.tau)  
+        input_scale = (1 - alpha) * self.tau    
 
         # 更新突触和膜电位状态
-        self.syn = alpha_syn * self.syn + input_scale * x
-        self.mem = alpha_mem * self.mem + (1 - alpha_mem) * self.syn
+        self.syn = alpha * self.syn + input_scale * x
+        self.mem = alpha * self.mem + (1 - alpha) * self.syn
 
         # 生成脉冲
         spike = SurrogateGradientFunction.apply(

@@ -1,37 +1,39 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 from utils.load_dataset_deap import dataset_prepare
 from module.LIF import  SNNRateLayer, SurrogateGradientFunction
 
 
+import torch
+import torch.nn as nn
+from module.LIF import SNNRateLayer, SurrogateGradientFunction  # 假设这些模块已定义
+
 class SNN(nn.Module):
     def __init__(self, input_dim=32, hidden_dim=200, output_dim=2):
         super(SNN, self).__init__()
 
-        # 第一层参数
+        # 第一层参数，合并 tau_mem 和 tau_syn 为 tau
         self.layer1_params = {
             'thresh': 0.5,
-            'tau_mem': 10.0,
-            'tau_syn': 5.0,
+            'tau': 10.0,  # 单一时间常数
             'dt': 1.0,
             'reset_mode': 'soft',
-            'grad_type': 'multi_gaussian',
+            'grad_type': 'gaussian',
             'lens': 0.5,
             'gamma': 1.0,
             'hight': 0.15,
             'learn_params': True
         }
-
-        # 第二层参数
+        
+        # 第二层参数，合并 tau_mem 和 tau_syn 为 tau
         self.layer2_params = {
             'thresh': 1.0,
-            'tau_mem': 20.0,
-            'tau_syn': 10.0,
+            'tau': 20.0,  # 单一时间常数
             'dt': 1.0,
             'reset_mode': 'soft',
             'grad_type': 'multi_gaussian',
@@ -41,118 +43,61 @@ class SNN(nn.Module):
             'learn_params': True
         }
 
-        # 创建两层网络 32-> 200 -> 2
+        # 创建两层网络 32 -> 200 -> 2
         self.fc1 = SNNRateLayer(input_dim, hidden_dim, **self.layer1_params)
         self.fc2 = SNNRateLayer(hidden_dim, output_dim, **self.layer2_params)
 
     def set_neuron_state(self, batch_size, device):
-        # 重置第一层状态
-        self.fc1.neurons.syn = torch.zeros(batch_size, self.fc1.neurons.num_neurons, device=device)
-        self.fc1.neurons.mem = torch.zeros(batch_size, self.fc1.neurons.num_neurons, device=device)
-
-        # 重置第二层状态
-        self.fc2.neurons.syn = torch.zeros(batch_size, self.fc2.neurons.num_neurons, device=device)
-        self.fc2.neurons.mem = torch.zeros(batch_size, self.fc2.neurons.num_neurons, device=device)
+        self.fc1.set_neuron_state(batch_size, device)
+        self.fc2.set_neuron_state(batch_size, device)
 
     def forward(self, input):
-        # input shape: [batch_size, seq_length, input_dim]
         batch_size, seq_length, input_dim = input.shape
         device = input.device
-
-        # 初始化神经元状态
         self.set_neuron_state(batch_size, device)
 
-        # 存储输出
         output = torch.zeros(batch_size, self.fc2.neurons.num_neurons, device=device)
+        all_spikes_1, all_mems_1 = [], []
+        all_spikes_2, all_mems_2 = [], []
 
-        # 存储每个时间步的状态（如果需要）
-        all_spikes_1 = []
-        all_mems_1 = []
-        all_spikes_2 = []
-        all_mems_2 = []
-
-        # 按时间步处理
         for t in range(seq_length):
             input_t = input[:, t, :]
 
-            # 第一层
-            weighted_1 = torch.matmul(input_t, self.fc1.weight)
-            alpha_syn_1 = torch.exp(-self.fc1.neurons.dt / self.fc1.neurons.tau_syn)
-            alpha_mem_1 = torch.exp(-self.fc1.neurons.dt / self.fc1.neurons.tau_mem)
-            input_scale_1 = (1 - alpha_syn_1) * self.fc1.neurons.tau_syn
-            self.fc1.neurons.syn = alpha_syn_1 * self.fc1.neurons.syn + input_scale_1 * weighted_1
-            self.fc1.neurons.mem = alpha_mem_1 * self.fc1.neurons.mem + \
-                                   (1 - alpha_mem_1) * self.fc1.neurons.syn
-
-            spike_1 = SurrogateGradientFunction.apply(
-                self.fc1.neurons.mem - self.fc1.neurons.thresh,
-                self.fc1.neurons.grad_type,
-                self.fc1.neurons.lens,
-                self.fc1.neurons.gamma,
-                self.fc1.neurons.hight
-            )
-
-            if self.fc1.neurons.reset_mode == 'soft':
-                self.fc1.neurons.mem = self.fc1.neurons.mem - spike_1 * self.fc1.neurons.thresh
-            else:
-                self.fc1.neurons.mem = self.fc1.neurons.mem * (1 - spike_1)
-
-            # 第二层
-            weighted_2 = torch.matmul(spike_1, self.fc2.weight)
-            alpha_syn_2 = torch.exp(-self.fc2.neurons.dt / self.fc2.neurons.tau_syn)
-            alpha_mem_2 = torch.exp(-self.fc2.neurons.dt / self.fc2.neurons.tau_mem)
-            input_scale_2 = (1 - alpha_syn_2) * self.fc2.neurons.tau_syn
-            self.fc2.neurons.syn = alpha_syn_2 * self.fc2.neurons.syn + input_scale_2 * weighted_2
-            self.fc2.neurons.mem = alpha_mem_2 * self.fc2.neurons.mem + \
-                                   (1 - alpha_mem_2) * self.fc2.neurons.syn
-
-            spike_2 = SurrogateGradientFunction.apply(
-                self.fc2.neurons.mem - self.fc2.neurons.thresh,
-                self.fc2.neurons.grad_type,
-                self.fc2.neurons.lens,
-                self.fc2.neurons.gamma,
-                self.fc2.neurons.hight
-            )
-
-            if self.fc2.neurons.reset_mode == 'soft':
-                self.fc2.neurons.mem = self.fc2.neurons.mem - spike_2 * self.fc2.neurons.thresh
-            else:
-                self.fc2.neurons.mem = self.fc2.neurons.mem * (1 - spike_2)
+            spike_1, mem_1 = self.fc1(input_t)  # 第一层
+            spike_2, mem_2 = self.fc2(spike_1)  # 第二层
 
             if t > 0:
-                output += self.fc2.neurons.mem
+                output += mem_2
 
             all_spikes_1.append(spike_1)
-            all_mems_1.append(self.fc1.neurons.mem)
+            all_mems_1.append(mem_1)
             all_spikes_2.append(spike_2)
-            all_mems_2.append(self.fc2.neurons.mem)
+            all_mems_2.append(mem_2)
 
         output = output / seq_length
-
-        all_states = {
+        return output, {
             'spikes_1': torch.stack(all_spikes_1, dim=1),
             'mems_1': torch.stack(all_mems_1, dim=1),
             'spikes_2': torch.stack(all_spikes_2, dim=1),
             'mems_2': torch.stack(all_mems_2, dim=1)
         }
 
-        return output, all_states
-
+# 训练函数
 def train(model, train_loader, optimizer, criterion, device, epochs=10):
     """
-    Train the SNN model.
+    训练 SNN 模型，使用 tqdm 显示训练进度。
     
-    Args:
-        model: SNN model instance
-        train_loader: DataLoader for training data
-        optimizer: Optimizer (e.g., Adam)
-        criterion: Loss function (e.g., CrossEntropyLoss)
-        device: Device to run on (CPU/GPU)
-        epochs: Number of training epochs
+    参数:
+        model: SNN 模型实例
+        train_loader: 训练数据的 DataLoader
+        optimizer: 优化器（如 Adam）
+        criterion: 损失函数（如 CrossEntropyLoss）
+        device: 运行设备（CPU/GPU）
+        epochs: 训练轮数
     
-    Returns:
-        train_losses: List of average losses per epoch
-        train_accuracies: List of accuracies per epoch
+    返回:
+        train_losses: 每轮平均损失列表
+        train_accuracies: 每轮准确率列表
     """
     model.train()
     train_losses = []
@@ -163,52 +108,57 @@ def train(model, train_loader, optimizer, criterion, device, epochs=10):
         all_preds = []
         all_labels = []
 
-        for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
-            optimizer.zero_grad()
+        # 使用 tqdm 显示每轮的批次进度
+        with tqdm(train_loader, desc=f"第 {epoch+1}/{epochs} 轮", unit="批次") as pbar:
+            for data, target in pbar:
+                data, target = data.to(device), target.to(device)
+                optimizer.zero_grad()
 
-            # Reset neuron states at the start of each batch
-            model.set_neuron_state(data.size(0), device)
+                # 重置神经元状态
+                model.set_neuron_state(data.size(0), device)
 
-            # Forward pass: [batch_size, seq_length, input_dim] -> [batch_size, output_dim]
-            output, _ = model(data)
-            loss = criterion(output, target)  # Output is membrane potential, not probabilities
+                # 前向传播
+                output, _ = model(data)
+                loss = criterion(output, target)
 
-            # Backward pass and optimization
-            loss.backward()
-            optimizer.step()
+                # 反向传播和优化
+                loss.backward()
+                optimizer.step()
 
-            total_loss += loss.item()
+                total_loss += loss.item()
 
-            # Compute predictions (argmax over output_dim)
-            pred = torch.argmax(output, dim=1)
-            all_preds.extend(pred.cpu().numpy())
-            all_labels.extend(target.cpu().numpy())
+                # 计算预测
+                pred = torch.argmax(output, dim=1)
+                all_preds.extend(pred.cpu().numpy())
+                all_labels.extend(target.cpu().numpy())
 
-        # Calculate epoch metrics
+                # 更新进度条信息
+                pbar.set_postfix({"损失": f"{loss.item():.4f}"})
+
+        # 计算每轮指标
         avg_loss = total_loss / len(train_loader)
         accuracy = accuracy_score(all_labels, all_preds)
         train_losses.append(avg_loss)
         train_accuracies.append(accuracy)
 
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.4f}, Accuracy: {accuracy:.4f}")
+        print(f"第 {epoch+1}/{epochs} 轮, 平均损失: {avg_loss:.4f}, 准确率: {accuracy:.4f}")
 
     return train_losses, train_accuracies
 
-# Evaluation function
+# 评估函数
 def evaluate(model, test_loader, criterion, device):
     """
-    Evaluate the SNN model on the test set.
+    在测试集上评估 SNN 模型。
     
-    Args:
-        model: SNN model instance
-        test_loader: DataLoader for test data
-        criterion: Loss function
-        device: Device to run on (CPU/GPU)
+    参数:
+        model: SNN 模型实例
+        test_loader: 测试数据的 DataLoader
+        criterion: 损失函数
+        device: 运行设备（CPU/GPU）
     
-    Returns:
-        test_loss: Average test loss
-        test_accuracy: Test accuracy
+    返回:
+        test_loss: 平均测试损失
+        test_accuracy: 测试准确率
     """
     model.eval()
     total_loss = 0
@@ -218,89 +168,84 @@ def evaluate(model, test_loader, criterion, device):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
-
-            # Reset neuron states
             model.set_neuron_state(data.size(0), device)
-
-            # Forward pass
             output, _ = model(data)
             loss = criterion(output, target)
 
             total_loss += loss.item()
-
-            # Compute predictions
             pred = torch.argmax(output, dim=1)
             all_preds.extend(pred.cpu().numpy())
             all_labels.extend(target.cpu().numpy())
 
-    # Calculate metrics
     avg_loss = total_loss / len(test_loader)
     accuracy = accuracy_score(all_labels, all_preds)
-    print(f"Test Loss: {avg_loss:.4f}, Test Accuracy: {accuracy:.4f}")
+    print(f"测试损失: {avg_loss:.4f}, 测试准确率: {accuracy:.4f}")
     return avg_loss, accuracy
 
-# Main function
+# 主函数
 def main():
     """
-    Main script to load data, initialize model, train, evaluate, and visualize results.
+    主脚本：加载数据、初始化模型、训练、评估并可视化结果。
     """
-    # Hyperparameters
-    batch_size = 32
+    # 超参数
+    batch_size = 128
     learning_rate = 0.001
-    epochs = 10
+    epochs = 30
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Data directory (adjust to your local path)
+    # 数据目录（调整为你的本地路径）
     data_dir = "C:\\Users\\VECTOR\\Desktop\\DeepLearning\\SNN_code\\dataset"
 
-    # Load and prepare data
+    # 加载并准备数据
     train_loader, test_loader = dataset_prepare(
-        window_length_sec=4,          # 4-second windows (512 time points at 128Hz)
-        n_subjects=26,               # Number of subjects for training
-        single_subject=False,        # Use multiple subjects
-        load_all=True,               # Load all data and split into train/test
-        only_EEG=True,               # Use only EEG channels
-        label_type=[0, 2],           # Valence, 2 classes (0 or 1)
+        window_length_sec=4,
+        n_subjects=26,
+        single_subject=False,
+        load_all=True,
+        only_EEG=True,
+        label_type=[0, 2],
         data_dir=data_dir,
         batch_size=batch_size,
-        normalize=True               # Apply Z-score normalization
+        normalize=True
     )
 
-    # Initialize model
-    input_dim = 32   # Number of EEG channels
-    hidden_dim = 200 # Hidden layer size
-    output_dim = 2   # Number of classes (binary valence)
+    # 初始化模型
+    input_dim = 32
+    hidden_dim = 200
+    output_dim = 2
     model = SNN(input_dim, hidden_dim, output_dim).to(device)
 
-    # Define loss function and optimizer
-    criterion = nn.CrossEntropyLoss()  # Suitable for classification
+    # 定义损失函数和优化器
+    criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
-    # Train the model
-    print("Starting training...")
+    # 训练模型
+    print("开始训练...")
     train_losses, train_accuracies = train(model, train_loader, optimizer, criterion, device, epochs)
 
-    # Evaluate the model
-    print("\nEvaluating on test set...")
+    # 评估模型
+    print("\n在测试集上评估...")
     test_loss, test_accuracy = evaluate(model, test_loader, criterion, device)
 
-    # Visualize training progress
+    # 最终可视化
     plt.figure(figsize=(12, 5))
 
-    # Plot loss
+    # 绘制损失
     plt.subplot(1, 2, 1)
-    plt.plot(train_losses, label="Train Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training Loss")
+    plt.plot(range(1, epochs + 1), train_losses, 'b-', label="训练损失")
+    plt.axhline(y=test_loss, color='r', linestyle='--', label="测试损失")
+    plt.xlabel("轮次")
+    plt.ylabel("损失")
+    plt.title("损失随时间变化")
     plt.legend()
 
-    # Plot accuracy
+    # 绘制准确率
     plt.subplot(1, 2, 2)
-    plt.plot(train_accuracies, label="Train Accuracy")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy")
-    plt.title("Training Accuracy")
+    plt.plot(range(1, epochs + 1), train_accuracies, 'g-', label="训练准确率")
+    plt.axhline(y=test_accuracy, color='r', linestyle='--', label="测试准确率")
+    plt.xlabel("轮次")
+    plt.ylabel("准确率")
+    plt.title("准确率随时间变化")
     plt.legend()
 
     plt.tight_layout()
@@ -308,4 +253,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
