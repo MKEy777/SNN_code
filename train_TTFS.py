@@ -4,7 +4,7 @@ import torch
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
-from snn_module import SNNModel, SpikingDense
+from module.TTFS import SNNModel, SpikingDense
 
 # ### 数据集加载
 

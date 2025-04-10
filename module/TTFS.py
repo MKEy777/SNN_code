@@ -41,8 +41,8 @@ class SpikingDense(nn.Module):
         self.robustness_params = robustness_params
 
         # 初始化权重和参数
-        self.kernel = nn.Parameter(torch.empty(input_dim, units, dtype=torch.float64))
-        self.D_i = nn.Parameter(torch.zeros(units, dtype=torch.float64))
+        self.kernel = nn.Parameter(torch.empty(input_dim, units, dtype=torch.float32))
+        self.D_i = nn.Parameter(torch.zeros(units, dtype=torch.float32))
         
         # 权重初始化
         if kernel_initializer == 'glorot_uniform':
@@ -51,12 +51,12 @@ class SpikingDense(nn.Module):
             nn.init.normal_(self.kernel, mean=0.0, std=1.0)
 
     def set_params(self, t_min_prev: float, t_min: float, device):
-        """设置时间参数"""
-        self.t_min_prev = torch.tensor(t_min_prev, dtype=torch.float64, device=device)
-        self.t_min = torch.tensor(t_min, dtype=torch.float64, device=device)
-        self.t_max = torch.tensor(t_min + self.B_n, dtype=torch.float64, device=device)
-        self.alpha = torch.ones(self.units, dtype=torch.float64, device=device)
-        return t_min, t_min + self.B_n
+        self.t_min_prev = torch.tensor(t_min_prev, dtype=torch.float32, device=device)
+        self.t_min = torch.tensor(t_min, dtype=torch.float32, device=device)
+        self.t_max = self.t_min + self.B_n  
+        self.alpha = torch.ones(self.units, dtype=torch.float32, device=device)
+        return t_min, self.t_max.item()
+
 
     def forward(self, tj):
         if not self.outputLayer:
@@ -78,13 +78,9 @@ class SNNModel(nn.Module):
 
     def forward(self, x):
         t_min_prev, t_min = 0.0, 1.0
-        
         for layer in self.layers:
             if isinstance(layer, SpikingDense):
                 device = x.device
-                t_max = t_min + max(layer.t_max.item() - layer.t_min.item(),
-                                    10.0 * (layer.t_max - torch.min(x)).item())
                 t_min_prev, t_min = layer.set_params(t_min_prev, t_min, device)
             x = layer(x)
-                
         return x
