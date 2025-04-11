@@ -69,7 +69,7 @@ class SpikingDense(nn.Module):
                                   self.t_min, self.t_max, self.robustness_params)
         else:
             W_mult_x = torch.matmul(self.t_min - tj, self.kernel)
-            self.alpha = self.D_i / (self.t_min - self.t_min_prev + 1e-10)  # 避免除以零
+            self.alpha = self.D_i / (self.t_min - self.t_min_prev + 1e-10)  
             output = self.alpha * (self.t_min - self.t_min_prev) + W_mult_x
         return output
 
