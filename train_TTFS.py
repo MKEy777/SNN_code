@@ -10,36 +10,29 @@ class SNNTTFS(nn.Module):
     def __init__(self, time_steps=512):
         super().__init__()
         self.time_steps = time_steps
-        
-        # Network layers: 32-200-2
-        self.layer1 = SNNTTFSLayer(32, 200)
-        self.layer2 = SNNTTFSLayer(200, 2, is_output_layer=True)
-        
+        self.layer1 = SNNTTFSLayer(32, 256, thresh=0.05, dt=0.5,lens=1.0, gamma=2.0 )
+        self.layer2 = SNNTTFSLayer(256, 128, thresh=0.03, dt=0.8,lens=1.0, gamma=2.0)
+        self.layer3 = SNNTTFSLayer(128, 2, is_output_layer=True, thresh=0.01, dt=1.0,lens=1.0, gamma=2.0)
+    
     def forward(self, x):
         batch_size = x.shape[0]
         device = x.device
-        
-        # Initialize neuron states
         self.layer1.set_neuron_state(batch_size, device)
         self.layer2.set_neuron_state(batch_size, device)
-        
-        # Store output membrane potentials
+        self.layer3.set_neuron_state(batch_size, device)
         outputs = []
-        
-        # Process each time step
         for t in range(self.time_steps):
-            current_input = x[:, t, :]  # (batch_size, 32)
-            
-            # Forward pass through layers
-            hidden = self.layer1(current_input, t)
-            output = self.layer2(hidden, t)
+            current_input = x[:, t, :]
+            hidden1 = self.layer1(current_input, t)
+            if t == self.time_steps - 1:
+                print(f"Layer1 脉冲比例: {hidden1.mean().item():.4f}")
+            hidden2 = self.layer2(hidden1, t)
+            if t == self.time_steps - 1:
+                print(f"Layer2 脉冲比例: {hidden2.mean().item():.4f}")
+            output = self.layer3(hidden2, t)
             outputs.append(output)
-        
-        # Stack outputs and get final prediction
-        outputs = torch.stack(outputs, dim=1)  # (batch_size, time_steps, 2)
-        final_output = outputs[:, -1, :]  # Use last timestep's output
-        
-        return final_output
+        outputs = torch.stack(outputs, dim=1)
+        return outputs.mean(dim=1)
 
 def train_epoch(model, train_loader, optimizer, criterion, device):
     model.train()
@@ -52,25 +45,27 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
     
     for batch_idx, (data, target) in enumerate(progress_bar):
         data, target = data.to(device), target.to(device)
-        
+        data = data * 20
         optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, target)
-        
         loss.backward()
+        grad_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        
-        # 计算当前批次的 loss 和 accuracy
         batch_loss = loss.item()
         pred = output.argmax(dim=1)
         batch_correct = pred.eq(target).sum().item()
         batch_total = target.size(0)
         batch_acc = batch_correct / batch_total
-        
-        # 累积总计值
         total_loss += batch_loss
         correct += batch_correct
         total += batch_total
+        progress_bar.set_postfix({
+            'batch_loss': f'{batch_loss:.4f}',
+            'batch_acc': f'{batch_acc:.4f}',
+            'grad_norm': f'{grad_norm:.4f}'
+        })
         
         # 更新 tqdm 进度条的描述，实时显示 loss 和 accuracy
         progress_bar.set_postfix({
@@ -98,6 +93,7 @@ def evaluate(model, test_loader, criterion, device):
     with torch.no_grad():
         for data, target in test_loader:
             data, target = data.to(device), target.to(device)
+            data = data * 20
             output = model(data)
             loss = criterion(output, target)
             
@@ -131,7 +127,7 @@ def main():
     # Hyperparameters
     num_epochs = 20
     batch_size = 128
-    learning_rate = 0.001
+    learning_rate = 0.01
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     # Load DEAP dataset
@@ -149,7 +145,6 @@ def main():
         batch_size=batch_size,
         normalize=True
     )
-    
     # Initialize model
     model = SNNTTFS().to(device)
     criterion = nn.CrossEntropyLoss()

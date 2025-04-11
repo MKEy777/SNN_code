@@ -68,12 +68,8 @@ class LIFTTFSNeuronLayer(nn.Module):
 
     def forward(self, x, current_time):
         alpha = torch.exp(-self.dt)
-        input_scale = 1 - alpha
         mask = (~self.has_spiked).float()
-
-        self.syn = alpha * self.syn + input_scale * x * mask
-        self.mem = alpha * self.mem + (1 - alpha) * self.syn * mask
-
+        self.mem = alpha * self.mem + (1 - alpha) * x * mask  
         if self.is_output_layer:
             return self.mem
         else:
@@ -108,7 +104,7 @@ class SNNTTFSLayer(nn.Module):
     def __init__(self, in_features, out_features, is_output_layer=False, **neuron_params):
         super().__init__()
         self.weight = nn.Parameter(torch.empty(in_features, out_features))
-        nn.init.xavier_uniform_(self.weight)  # Xavier 初始化
+        nn.init.normal_(self.weight, mean=0, std=0.1)
         self.neurons = LIFTTFSNeuronLayer(num_neurons=out_features, is_output_layer=is_output_layer, **neuron_params)
         self.is_output_layer = is_output_layer
 
