@@ -251,16 +251,17 @@ def dataset_prepare(window_length_sec=4, n_subjects=26, single_subject=False, lo
 if __name__ == '__main__':
     data_dir = "C:\\Users\\VECTOR\\Desktop\\DeepLearning\\SNN_code\\dataset"
     train_loader, test_loader = dataset_prepare(
-        window_length_sec=4,
-        n_subjects=26,
-        single_subject=False,
-        load_all=True,
-        only_EEG=True,
-        label_type=[0, 2],
-        data_dir=data_dir,
-        batch_size=32,
-        normalize=True
+    window_length_sec=4,         # 滑动窗口长度
+    n_subjects=26,               # 被试编号
+    single_subject=False,        # 是否单被试
+    load_all=True,               # 加载全部
+    only_EEG=True,               # 仅EEG通道
+    label_type=[0, 2],           # 左valence 和 arousal ，右分类
+    data_dir=data_dir,           # 
+    batch_size=32,               # 
+    normalize=True               # Z-score标准化
     )
+
 
     # 检查第一个batch
     for batch_idx, (data, target) in enumerate(train_loader):

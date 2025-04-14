@@ -10,9 +10,9 @@ class SNNTTFS(nn.Module):
     def __init__(self, time_steps=512):
         super().__init__()
         self.time_steps = time_steps
-        self.layer1 = SNNTTFSLayer(32, 256, thresh=0.05, dt=0.5,lens=1.0, gamma=2.0 )
-        self.layer2 = SNNTTFSLayer(256, 128, thresh=0.03, dt=0.8,lens=1.0, gamma=2.0)
-        self.layer3 = SNNTTFSLayer(128, 2, is_output_layer=True, thresh=0.01, dt=1.0,lens=1.0, gamma=2.0)
+        self.layer1 = SNNTTFSLayer(32, 256, thresh=0.01, dt=0.5, lens=1.0, gamma=2.0)
+        self.layer2 = SNNTTFSLayer(256, 128, thresh=0.01, dt=0.8, lens=1.0, gamma=2.0)
+        self.layer3 = SNNTTFSLayer(128, 2, is_output_layer=True, thresh=0.01, dt=1.0, lens=1.0, gamma=2.0)
     
     def forward(self, x):
         batch_size = x.shape[0]
@@ -20,19 +20,33 @@ class SNNTTFS(nn.Module):
         self.layer1.set_neuron_state(batch_size, device)
         self.layer2.set_neuron_state(batch_size, device)
         self.layer3.set_neuron_state(batch_size, device)
-        outputs = []
+        final_output = None
+        spike_sum1 = 0.0
+        spike_sum2 = 0.0
+
         for t in range(self.time_steps):
             current_input = x[:, t, :]
             hidden1 = self.layer1(current_input, t)
-            if t == self.time_steps - 1:
-                print(f"Layer1 脉冲比例: {hidden1.mean().item():.4f}")
             hidden2 = self.layer2(hidden1, t)
+
+            # 累加所有时间步的脉冲比例
+            spike_sum1 += hidden1.mean().item()
+            spike_sum2 += hidden2.mean().item()
+
             if t == self.time_steps - 1:
-                print(f"Layer2 脉冲比例: {hidden2.mean().item():.4f}")
-            output = self.layer3(hidden2, t)
-            outputs.append(output)
-        outputs = torch.stack(outputs, dim=1)
-        return outputs.mean(dim=1)
+                spike_time = self.layer2.neurons.spike_time
+                spike_time = torch.where(spike_time == float('inf'), 
+                                    torch.tensor(self.time_steps, device=device, dtype=torch.float32), 
+                                    spike_time)
+                final_output = self.layer3(hidden2, t, spike_time)
+
+        # 输出整个时间窗口的平均脉冲比例
+        print(f"Layer1 平均脉冲比例: {spike_sum1 / self.time_steps:.4f}")
+        print(f"Layer2 平均脉冲比例: {spike_sum2 / self.time_steps:.4f}")
+
+        if final_output is None:
+            raise ValueError("No output generated")
+        return final_output
 
 def train_epoch(model, train_loader, optimizer, criterion, device):
     model.train()
@@ -143,7 +157,7 @@ def main():
         label_type=label_type,
         data_dir=data_dir,
         batch_size=batch_size,
-        normalize=True
+        normalize=None
     )
     # Initialize model
     model = SNNTTFS().to(device)

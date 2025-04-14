@@ -47,49 +47,47 @@ class LIFTTFSNeuronLayer(nn.Module):
         super().__init__()
         self.num_neurons = num_neurons
         self.is_output_layer = is_output_layer
-
         if learn_params:
-            self.dt = nn.Parameter(torch.tensor(dt, dtype=torch.float32))
+            self.dt = nn.Parameter(torch.tensor(dt))
             self.thresh = nn.Parameter(torch.ones(num_neurons) * thresh)
+            self.bias = nn.Parameter(torch.zeros(num_neurons)) if is_output_layer else None
         else:
-            self.register_buffer('dt', torch.tensor(dt, dtype=torch.float32))
+            self.register_buffer('dt', torch.tensor(dt))
             self.register_buffer('thresh', torch.ones(num_neurons) * thresh)
-
+            self.bias = torch.zeros(num_neurons) if is_output_layer else None
         self.reset_mode = reset_mode
         self.grad_type = grad_type
         self.lens = lens
         self.gamma = gamma
         self.hight = hight
-
         self.syn = None
         self.mem = None
         self.has_spiked = None
         self.spike_time = None
+        self.t_min = 1.0
+        self.t_min_prev = 0.0
 
-    def forward(self, x, current_time):
-        alpha = torch.exp(-self.dt)
-        mask = (~self.has_spiked).float()
-        self.mem = alpha * self.mem + (1 - alpha) * x * mask  
+    def forward(self, x, current_time, input_spike_time=None):
         if self.is_output_layer:
-            return self.mem
+            if input_spike_time is None:
+                raise ValueError("Output layer requires input spike times")
+            time_diff = self.t_min - input_spike_time
+            output = torch.matmul(time_diff, x)
+            output = output + self.bias
+            return output
         else:
+            alpha = torch.exp(-self.dt)
+            mask = (~self.has_spiked).float()
+            self.mem = alpha * self.mem + (1 - alpha) * x * mask
             spike = SurrogateGradientFunction.apply(
-                self.mem - self.thresh,
-                self.grad_type,
-                self.lens,
-                self.gamma,
-                self.hight
-            )
-
+                self.mem - self.thresh, self.grad_type, self.lens, self.gamma, self.hight)
             new_spikes = (spike > 0) & (~self.has_spiked)
             self.spike_time = torch.where(new_spikes, current_time, self.spike_time)
             self.has_spiked = self.has_spiked | (spike > 0)
-
             if self.reset_mode == 'soft':
                 self.mem = self.mem - spike * self.thresh * mask
             else:
                 self.mem = self.mem * (1 - spike) * mask
-
             return spike
 
     def set_neuron_state(self, batch_size, device, default_spike_time=float('inf')):
@@ -108,9 +106,12 @@ class SNNTTFSLayer(nn.Module):
         self.neurons = LIFTTFSNeuronLayer(num_neurons=out_features, is_output_layer=is_output_layer, **neuron_params)
         self.is_output_layer = is_output_layer
 
-    def forward(self, x, current_time):
-        weighted = torch.matmul(x, self.weight)
-        return self.neurons(weighted, current_time)
+    def forward(self, x, current_time, input_spike_time=None):
+        if self.is_output_layer:
+            return self.neurons(self.weight, current_time, input_spike_time)
+        else:
+            weighted = torch.matmul(x, self.weight)
+            return self.neurons(weighted, current_time)
 
     def set_neuron_state(self, batch_size, device, default_spike_time=float('inf')):
         self.neurons.set_neuron_state(batch_size, device, default_spike_time)
