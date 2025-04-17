@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.optim as optim
 from utils.load_dataset_deap import dataset_prepare
 from module.TTFS import SNNTTFSLayer
-import numpy as np
 from tqdm import tqdm
 
 class SNNTTFS(nn.Module):
@@ -59,7 +58,7 @@ def train_epoch(model, train_loader, optimizer, criterion, device):
     
     for batch_idx, (data, target) in enumerate(progress_bar):
         data, target = data.to(device), target.to(device)
-        data = data * 20
+        data = data * 50
         optimizer.zero_grad()
         output = model(data)
         loss = criterion(output, target)

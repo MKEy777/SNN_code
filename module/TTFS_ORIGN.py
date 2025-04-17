@@ -24,8 +24,8 @@ def call_spiking(tj, W, D_i, t_min_prev, t_min, t_max, robustness_params):
         W = quantize_tensor(W, robustness_params['w_min'],
                             robustness_params['w_max'],
                             robustness_params['weight_bits'])
-
-    threshold = t_max - t_min - D_i
+   
+    threshold = t_max - t_min - D_i 
     ti = torch.matmul(tj - t_min, W) + threshold + t_min
     ti = torch.where(ti < t_max, ti, t_max)
     
@@ -58,7 +58,7 @@ class SpikingDense(nn.Module):
     def set_params(self, t_min_prev: float, t_min: float, device):
         self.t_min_prev = torch.tensor(t_min_prev, dtype=torch.float32, device=device)
         self.t_min = torch.tensor(t_min, dtype=torch.float32, device=device)
-        self.t_max = self.t_min + self.B_n  
+        self.t_max = self.t_min + torch.tensor(self.B_n, dtype=torch.float32, device=device)  
         self.alpha = torch.ones(self.units, dtype=torch.float32, device=device)
         return t_min, self.t_max.item()
 

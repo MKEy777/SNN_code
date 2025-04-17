@@ -192,7 +192,7 @@ def z_score_normalize(data_array):
 # --------------------------------------------
 def dataset_prepare(window_length_sec=4, n_subjects=26, single_subject=False, load_all=False,
                     only_phys=False, only_EEG=True, label_type=[0, 2], data_dir="...",
-                    batch_size=64, z_score_normalize=True):
+                    batch_size=64, use_z_score=True):
     """
     准备训练/测试集 DataLoader
     参数:
@@ -237,7 +237,7 @@ def dataset_prepare(window_length_sec=4, n_subjects=26, single_subject=False, lo
         test_labels = None
 
     # Z-score标准化（可选）
-    if z_score_normalize:
+    if use_z_score:  
         train_data = z_score_normalize(train_data)
         if test_data is not None:
             test_data = z_score_normalize(test_data)
