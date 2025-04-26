@@ -1,313 +1,215 @@
-import logging
+# snn_model_definitions.py
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from typing import Dict, Union, List, Optional
 
 class SpikingDense(nn.Module):
-    def __init__(self, units: int, name: str, X_n: float = 1, outputLayer: bool = False, 
+    """
+    脉冲神经网络 (SNN) 的脉冲全连接层 (使用 float32)。
+    """
+    def __init__(self, units: int, name: str, X_n: float = 1, outputLayer: bool = False,
                  robustness_params: Dict = {}, input_dim: Optional[int] = None,
                  kernel_regularizer=None, kernel_initializer=None):
         super(SpikingDense, self).__init__()
         self.units = units
         self.B_n = (1 + 0.5) * X_n
         self.outputLayer = outputLayer
-        self.t_min_prev = self.t_min = 0
-        self.t_max = 1
+        # 初始化时间参数为 float32
+        self.t_min_prev = torch.tensor(0.0, dtype=torch.float32)
+        self.t_min = torch.tensor(0.0, dtype=torch.float32)
+        self.t_max = torch.tensor(1.0, dtype=torch.float32)
         self.robustness_params = robustness_params
-        self.alpha = torch.ones(units, dtype=torch.float64)
+        # Alpha 参数为 float32
+        self.alpha = nn.Parameter(torch.ones(units, dtype=torch.float32), requires_grad=False)
         self.input_dim = input_dim
+        self.name = name
+        self.kernel_initializer_config = kernel_initializer
 
-        # Initialize weights and bias
+        # 初始化权重 (kernel) 和偏置 (D_i) 为 float32
         if input_dim is not None:
-            self.kernel = nn.Parameter(torch.empty(input_dim, units, dtype=torch.float64))
-        self.D_i = nn.Parameter(torch.zeros(units, dtype=torch.float64))
-        
-        # Initialize weights if initializer provided
-        if kernel_initializer:
-            if isinstance(kernel_initializer, str):
-                if kernel_initializer == 'glorot_uniform':
-                    nn.init.xavier_uniform_(self.kernel)
-                # Add other initializers as needed
+            # 使用 float32
+            self.kernel = nn.Parameter(torch.empty(input_dim, units, dtype=torch.float32))
+        # 使用 float32
+        self.D_i = nn.Parameter(torch.zeros(units, dtype=torch.float32), requires_grad=True)
+
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        """ Helper function to initialize weights and bias """
+        if hasattr(self, 'kernel'):
+            kernel_initializer = self.kernel_initializer_config
+            if kernel_initializer:
+                if isinstance(kernel_initializer, str):
+                    if kernel_initializer == 'glorot_uniform':
+                        nn.init.xavier_uniform_(self.kernel)
+                    else:
+                        print(f"Warning: Unknown kernel_initializer string '{kernel_initializer}'. Using xavier_uniform_.")
+                        nn.init.xavier_uniform_(self.kernel)
+                else:
+                    try:
+                        kernel_initializer(self.kernel)
+                    except Exception as e:
+                         print(f"Warning: Failed to apply custom kernel_initializer {e}. Using xavier_uniform_.")
+                         nn.init.xavier_uniform_(self.kernel)
             else:
-                kernel_initializer(self.kernel)
+                 nn.init.xavier_uniform_(self.kernel)
+        # Bias initialization (already float32)
+        # nn.init.zeros_(self.D_i)
+
+    def build(self, input_shape):
+        """ Dynamically build the layer (create kernel) if input_dim wasn't known initially. """
+        if not hasattr(self, 'kernel'):
+            self.input_dim = input_shape[-1]
+             # 使用 float32
+            self.kernel = nn.Parameter(torch.empty(self.input_dim, self.units, dtype=torch.float32))
+            self._initialize_weights()
 
     def set_params(self, t_min_prev: float, t_min: float):
-        self.t_min_prev = torch.tensor(t_min_prev, dtype=torch.float64)
-        self.t_min = torch.tensor(t_min, dtype=torch.float64)
-        self.t_max = torch.tensor(t_min + self.B_n, dtype=torch.float64)
-        return t_min, t_min + self.B_n
+        """ 设置层的最小和最大脉冲时间边界 (使用 float32)。 """
+        # 使用 float32
+        self.t_min_prev = torch.tensor(t_min_prev, dtype=torch.float32)
+        self.t_min = torch.tensor(t_min, dtype=torch.float32)
+        self.t_max = torch.tensor(t_min + self.B_n, dtype=torch.float32)
+        return self.t_min, self.t_max
 
     def forward(self, tj):
-        if not self.outputLayer:
-            output = call_spiking(tj, self.kernel, self.D_i, self.t_min_prev, 
-                                self.t_min, self.t_max, self.robustness_params)
-        else:
-            # Output layer processing
+        """ 执行 SpikingDense 层的前向传播 (使用 float32)。 """
+        # Ensure input is float32
+        tj = tj.to(torch.float32)
+
+        if not hasattr(self, 'kernel'):
+             self.build(tj.shape)
+             self.kernel = self.kernel.to(tj.device)
+
+        # Move parameters to the correct device and ensure float32
+        self.alpha = self.alpha.to(tj.device).to(torch.float32)
+        self.t_min_prev = self.t_min_prev.to(tj.device).to(torch.float32)
+        self.t_min = self.t_min.to(tj.device).to(torch.float32)
+        self.t_max = self.t_max.to(tj.device).to(torch.float32)
+        # Ensure kernel and bias are on the correct device (handled by model.to(device))
+        # self.kernel = self.kernel.to(tj.device) # Parameter, moved by model.to(device)
+        # self.D_i = self.D_i.to(tj.device) # Parameter, moved by model.to(device)
+
+        if self.outputLayer:
+            # Ensure calculation uses float32
             W_mult_x = torch.matmul(self.t_min - tj, self.kernel)
-            self.alpha = self.D_i / (self.t_min - self.t_min_prev)
-            output = self.alpha * (self.t_min - self.t_min_prev) + W_mult_x
+            output = W_mult_x + self.D_i
+        else:
+            output = call_spiking(tj, self.kernel, self.D_i, self.t_min_prev,
+                                  self.t_min, self.t_max, self.robustness_params)
         return output
 
-
-class SpikingConv2D(nn.Module):
-    def __init__(self, filters: int, name: str, X_n: float = 1, padding: str = 'same',
-                 kernel_size: tuple = (3, 3), robustness_params: Dict = {},
-                 kernel_regularizer=None, kernel_initializer=None):
-        super(SpikingConv2D, self).__init__()
-        self.kernel_initializer = kernel_initializer
-        self.kernel_regularizer = kernel_regularizer
-        
-        self.filters = filters
-        self.kernel_size = kernel_size
-        self.padding = padding.lower()
-        self.B_n = (1 + 0.5) * X_n
-        self.t_min_prev = self.t_min = 0
-        self.t_max = 1
-        self.robustness_params = robustness_params
-        self.alpha = torch.ones(filters, dtype=torch.float64)
-        
-        self.padding_size = kernel_size[0] // 2 if self.padding == 'same' else 0
-        
-        self.BN = torch.tensor([0])
-        self.BN_before_ReLU = torch.tensor([0])
-        self.D_i = nn.Parameter(torch.zeros(9, filters, dtype=torch.float64))
-
-    def forward(self, tj):
-        batch_size, channels, height, width = tj.shape
-        logging.info(f"Input tensor shape: {tj.shape}")
-        
-        if self.padding == 'same':
-            tj = F.pad(tj, (self.padding_size,) * 4, value=self.t_min)
-            logging.info(f"After padding shape: {tj.shape}")
-
-        # 计算输出尺寸
-        if self.padding == 'same':
-            out_height = height
-            out_width = width
-        else:
-            out_height = height - self.kernel_size[0] + 1
-            out_width = width - self.kernel_size[1] + 1
-        
-        logging.info(f"Expected output dimensions: h={out_height}, w={out_width}")
-
-        # 使用 unfold 提取补丁
-        unfold = nn.Unfold(kernel_size=self.kernel_size, 
-                        stride=1, 
-                        padding=0)  # 修改为始终使用 padding=0
-        patches = unfold(tj)
-        logging.info(f"Unfolded patches shape: {patches.shape}")
-        
-        # 重塑补丁
-        patches = patches.transpose(1, 2).contiguous()
-        logging.info(f"Transposed patches shape: {patches.shape}")
-        
-        # 展平卷积核
-        kernel_flat = self.kernel.view(self.filters, -1)
-        logging.info(f"Flattened kernel shape: {kernel_flat.shape}")
-
-        if self.padding == 'valid' or self.BN != 1 or self.BN_before_ReLU == 1:
-            logging.info(f"Input to call_spiking - patches: {patches.shape}, kernel: {kernel_flat.t().shape}")
-            
-            ti = call_spiking(patches, kernel_flat.t(), 
-                            self.D_i[0], self.t_min_prev, self.t_min, self.t_max, 
-                            self.robustness_params)
-            logging.info(f"After call_spiking shape: {ti.shape}")
-            
-            # 重塑输出
-            ti = ti.reshape(batch_size, out_height * out_width, self.filters)
-            logging.info(f"After reshape shape: {ti.shape}")
-            
-            ti = ti.permute(0, 2, 1).contiguous()
-            ti = ti.view(batch_size, self.filters, out_height, out_width)
-            logging.info(f"Final output shape: {ti.shape}")
-            
-        return ti
-
-    def build(self, input_channels):
-        self.kernel = nn.Parameter(
-            torch.empty(self.filters, input_channels, *self.kernel_size, dtype=torch.float64))
-        
-        # 添加默认的初始化方法
-        if self.kernel_initializer is None:
-            nn.init.xavier_uniform_(self.kernel)
-        elif isinstance(self.kernel_initializer, str):
-            if self.kernel_initializer == 'glorot_uniform':
-                nn.init.xavier_uniform_(self.kernel)
-            elif self.kernel_initializer == 'glorot_normal':
-                nn.init.xavier_normal_(self.kernel)
-            elif self.kernel_initializer == 'he_uniform':
-                nn.init.kaiming_uniform_(self.kernel)
-            elif self.kernel_initializer == 'he_normal':
-                nn.init.kaiming_normal_(self.kernel)
-        else:
-            self.kernel_initializer(self.kernel)
-
-    def set_params(self, t_min_prev: float, t_min: float):
-        self.t_min_prev = torch.tensor(t_min_prev, dtype=torch.float64)
-        self.t_min = torch.tensor(t_min, dtype=torch.float64)
-        self.t_max = torch.tensor(t_min + self.B_n, dtype=torch.float64)
-        return t_min, t_min + self.B_n
-
-
 class SNNModel(nn.Module):
+    """ 简单的顺序脉冲神经网络模型容器 (使用 float32)。 """
     def __init__(self):
         super(SNNModel, self).__init__()
         self.layers = nn.ModuleList()
         self.loss_fn = nn.CrossEntropyLoss()
 
-    def forward(self, x):
-        t_min_prev, t_min = 0.0, 1.0
-        min_ti = []
-        
-        for layer in self.layers:
-            if isinstance(layer, (SpikingDense, SpikingConv2D)):
-                t_max = t_min + max(layer.t_max - layer.t_min, 
-                                  10.0 * (layer.t_max - torch.min(x)))
-                layer.t_min_prev = t_min_prev
-                layer.t_min = t_min
-                layer.t_max = t_max
-                t_min_prev, t_min = t_min, t_max
-            x = layer(x)
-            if isinstance(layer, (SpikingDense, SpikingConv2D)):
-                min_ti.append(torch.min(x))
-                
-        return x, min_ti
+    def add(self, layer):
+        """向模型添加一个层。"""
+        # Ensure added layer parameters are float32 (should be by default now)
+        self.layers.append(layer.to(torch.float32))
 
+    def forward(self, x):
+        """ 执行通过 SNN 所有层的前向传播 (使用 float32)。 """
+        # Ensure input is float32
+        x = x.to(torch.float32)
+        # 使用 float32 初始化时间边界
+        t_min_prev = torch.tensor(0.0, dtype=torch.float32, device=x.device)
+        t_min = torch.tensor(1.0, dtype=torch.float32, device=x.device)
+        min_ti_per_layer = []
+
+        for i, layer in enumerate(self.layers):
+            # Ensure layer is float32 (important if layers weren't added via self.add)
+            layer = layer.to(torch.float32)
+            if isinstance(layer, SpikingDense):
+                 # Ensure time parameters passed are standard floats
+                 current_t_min, current_t_max = layer.set_params(t_min_prev.item(), t_min.item())
+                 x = layer(x) # Pass float32 tensor
+                 if torch.is_tensor(x) and x.numel() > 0 and not layer.outputLayer:
+                     try:
+                         # Convert potential float32 result to standard float for list
+                         if torch.all(torch.isfinite(x)):
+                              min_val = torch.min(x).item()
+                              min_ti_per_layer.append(min_val)
+                         else: min_ti_per_layer.append(float('nan'))
+                     except RuntimeError: min_ti_per_layer.append(float('inf'))
+                 t_min_prev = current_t_min
+                 t_min = current_t_max
+                 if t_min <= t_min_prev:
+                     t_min = t_min_prev + 1e-6 # Use float32 epsilon?
+            else:
+                 x = layer(x.to(torch.float32)) # Ensure input to non-SNN layers is float32
+
+        return x, min_ti_per_layer
 
 def call_spiking(tj, W, D_i, t_min_prev, t_min, t_max, robustness_params):
-    if robustness_params.get('time_bits', 0) != 0:
-        tj = quantize_tensor(tj - t_min_prev, t_min_prev, t_min, 
-                           robustness_params['time_bits']) + t_min_prev
-    
-    if robustness_params.get('weight_bits', 0) != 0:
-        W = quantize_tensor(W, robustness_params['w_min'], 
-                          robustness_params['w_max'], 
-                          robustness_params['weight_bits'])
+    """ 确定标准脉冲层中输出脉冲时间的核心计算 (使用 float32)。 """
+    # Ensure inputs are float32
+    tj = tj.to(torch.float32)
+    W = W.to(torch.float32)
+    D_i = D_i.to(torch.float32)
+    t_min_prev = t_min_prev.to(torch.float32)
+    t_min = t_min.to(torch.float32)
+    t_max = t_max.to(torch.float32)
 
+    # --- 量化 (如果使用，确保在 float32 上操作) ---
+    if robustness_params.get('time_bits', 0) > 0:
+        relative_tj = tj - t_min_prev
+        quant_max_val = t_min - t_min_prev
+        epsilon = torch.tensor(1e-9, dtype=torch.float32, device=tj.device)
+        safe_quant_max_val = torch.where(quant_max_val <= epsilon, epsilon, quant_max_val)
+        quantized_relative_tj = quantize_tensor(relative_tj,
+                                                torch.tensor(0.0, dtype=torch.float32, device=tj.device),
+                                                safe_quant_max_val,
+                                                robustness_params['time_bits'])
+        tj = quantized_relative_tj + t_min_prev
+
+    if robustness_params.get('weight_bits', 0) > 0:
+        w_min = robustness_params.get('w_min', torch.min(W).item())
+        w_max = robustness_params.get('w_max', torch.max(W).item())
+        W = quantize_tensor(W, torch.tensor(w_min, dtype=torch.float32, device=W.device),
+                            torch.tensor(w_max, dtype=torch.float32, device=W.device),
+                            robustness_params['weight_bits'])
+
+    # --- 核心脉冲时间计算 (使用 float32) ---
     threshold = t_max - t_min - D_i
-    ti = (torch.matmul(tj - t_min, W) + threshold + t_min)
-    ti = torch.where(ti < t_max, ti, t_max)
-    
+    relative_tj = tj - t_min
+    W = W.to(relative_tj.device)
+    threshold = threshold.to(relative_tj.device)
+    t_min = t_min.to(relative_tj.device)
+    t_max = t_max.to(relative_tj.device)
+    ti_relative = torch.matmul(relative_tj, W) + threshold
+    ti = ti_relative + t_min
+
+    # --- 裁剪 (使用 float32) ---
+    ti = torch.clamp(ti, min=t_min, max=t_max)
+
+    # --- 噪声注入 (可选, 使用 float32) ---
     if robustness_params.get('noise', 0) != 0:
-        ti = ti + torch.randn_like(ti) * robustness_params['noise']
-    
+        noise_std = torch.tensor(robustness_params['noise'], dtype=torch.float32, device=ti.device)
+        noise = torch.randn_like(ti) * noise_std # randn_like creates float32 if ti is float32
+        ti = ti + noise
+        ti = torch.clamp(ti, min=t_min, max=t_max)
+
     return ti
 
-
 def quantize_tensor(x, min_val, max_val, num_bits):
-    # Simple linear quantization
-    scale = (2**num_bits - 1) / (max_val - min_val)
-    x_scaled = ((x - min_val) * scale).round() / scale + min_val
-    return x_scaled
-
-logging.basicConfig(level=logging.INFO)
-
-def test_snn_model():
-    try:
-        # 创建模型
-        model = SNNModel()
-        
-        # 添加层
-        input_dim = 784  # 例如MNIST数据集的输入维度
-        hidden_units = 128
-        output_units = 10
-        
-        # 添加一个SpikingDense隐藏层
-        hidden_layer = SpikingDense(
-            units=hidden_units,
-            name='hidden1',
-            X_n=1.0,
-            input_dim=input_dim,
-            outputLayer=False,
-            robustness_params={'time_bits': 8}
-        )
-        model.layers.append(hidden_layer)
-        
-        # 添加输出层
-        output_layer = SpikingDense(
-            units=output_units,
-            name='output',
-            X_n=1.0,
-            input_dim=hidden_units,
-            outputLayer=True,
-            robustness_params={'time_bits': 8}
-        )
-        model.layers.append(output_layer)
-        
-        # 创建测试数据
-        batch_size = 32
-        x = torch.rand(batch_size, input_dim, dtype=torch.float64)
-        
-        # 运行前向传播
-        logging.info("Running forward pass...")
-        output, min_ti = model(x)
-        
-        # 检查输出
-        logging.info(f"Output shape: {output.shape}")
-        logging.info(f"Min firing times: {min_ti}")
-        
-        return True
-    
-    except Exception as e:
-        logging.error(f"Test failed with error: {str(e)}")
-        return False
-
-def test_spiking_conv():
-    try:
-        # 创建更小的测试用例
-        conv_layer = SpikingConv2D(
-            filters=16,
-            name='conv1',
-            X_n=1.0,
-            kernel_size=(3, 3),
-            robustness_params={'time_bits': 8, 'weight_bits': 8, 'w_min': -1, 'w_max': 1, 'noise': 0},
-            kernel_initializer='glorot_uniform'
-        )
-        
-        # 使用更小的输入尺寸进行测试
-        batch_size = 2
-        input_channels = 3
-        height = 8
-        width = 8
-        x = torch.rand(batch_size, input_channels, height, width, dtype=torch.float64)
-        
-        logging.info(f"Test input shape: {x.shape}")
-        
-        # 构建层
-        conv_layer.build(input_channels)
-        conv_layer.set_params(0.0, 1.0)
-        
-        # 计算期望的输出尺寸
-        if conv_layer.padding == 'same':
-            expected_height = height
-            expected_width = width
-        else:
-            expected_height = height - conv_layer.kernel_size[0] + 1
-            expected_width = width - conv_layer.kernel_size[1] + 1
-            
-        expected_shape = (batch_size, conv_layer.filters, expected_height, expected_width)
-        logging.info(f"Expected output shape: {expected_shape}")
-        
-        # 运行前向传播
-        output = conv_layer(x)
-        logging.info(f"Actual output shape: {output.shape}")
-        
-        assert output.shape == expected_shape, f"Shape mismatch: expected {expected_shape}, got {output.shape}"
-        return True
-        
-    except Exception as e:
-        logging.error(f"Convolution test failed with error: {str(e)}")
-        logging.error(f"Error location: {e.__traceback__.tb_lineno}")
-        return False
-
-if __name__ == "__main__":
-    logging.info("Starting tests...")
-    
-    logging.info("Testing Dense layers...")
-    dense_result = test_snn_model()
-    logging.info(f"Dense layer test {'passed' if dense_result else 'failed'}")
-    
-    logging.info("\nTesting Convolution layer...")
-    conv_result = test_spiking_conv()
-    logging.info(f"Convolution layer test {'passed' if conv_result else 'failed'}")
+    """ 对张量执行简单的线性量化 (输入/输出 dtype 保持不变)。 """
+    # 量化函数本身不强制类型，它使用输入 x 的类型
+    if num_bits <= 0: return x
+    # Ensure min/max vals match tensor type for calculations
+    min_val = torch.as_tensor(min_val, dtype=x.dtype, device=x.device)
+    max_val = torch.as_tensor(max_val, dtype=x.dtype, device=x.device)
+    if torch.any(max_val <= min_val): return x
+    q_levels = 2**num_bits
+    # Ensure scale calculation maintains precision / correct type
+    scale = (q_levels - 1) / (max_val - min_val)
+    x_shifted = x - min_val
+    x_scaled = x_shifted * scale
+    x_rounded = torch.round(x_scaled)
+    x_rescaled = x_rounded / scale
+    x_quantized = x_rescaled + min_val
+    x_clamped = torch.clamp(x_quantized, min=min_val, max=max_val)
+    return x_clamped

@@ -1,184 +1,212 @@
+# train_snn.py
+import os
+import glob
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from utils.load_dataset_deap import dataset_prepare
-from module.TTFS import SNNTTFSLayer
-from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader
+from scipy.io import loadmat
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.preprocessing import MinMaxScaler
+import time
 
-class SNNTTFS(nn.Module):
-    def __init__(self, time_steps=512):
-        super().__init__()
-        self.time_steps = time_steps
-        self.layer1 = SNNTTFSLayer(32, 256, thresh=0.01, dt=0.5, lens=1.0, gamma=2.0)
-        self.layer2 = SNNTTFSLayer(256, 128, thresh=0.01, dt=0.8, lens=1.0, gamma=2.0)
-        self.layer3 = SNNTTFSLayer(128, 2, is_output_layer=True, thresh=0.01, dt=1.0, lens=1.0, gamma=2.0)
-    
-    def forward(self, x):
-        batch_size = x.shape[0]
-        device = x.device
-        self.layer1.set_neuron_state(batch_size, device)
-        self.layer2.set_neuron_state(batch_size, device)
-        self.layer3.set_neuron_state(batch_size, device)
-        final_output = None
-        spike_sum1 = 0.0
-        spike_sum2 = 0.0
+# 从单独的文件导入 SNN 模型定义
+from TTFS_ORIGN import SNNModel, SpikingDense
 
-        for t in range(self.time_steps):
-            current_input = x[:, t, :]
-            hidden1 = self.layer1(current_input, t)
-            hidden2 = self.layer2(hidden1, t)
+# --- Configuration ---
+FEATURE_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\Individual_Features"
+if not os.path.isdir(FEATURE_DIR):
+    print(f"ERROR: Feature directory not found: {FEATURE_DIR}")
+    exit()
 
-            # 累加所有时间步的脉冲比例
-            spike_sum1 += hidden1.mean().item()
-            spike_sum2 += hidden2.mean().item()
+# Model Hyperparameters
+INPUT_SIZE = 4216
+HIDDEN_UNITS_1 = 512
+HIDDEN_UNITS_2 = 128
+OUTPUT_SIZE = 3
+X_N_HIDDEN = 1.0
+X_N_OUTPUT = 1.0
+T_MIN_INPUT = 0.0
+T_MAX_INPUT = 1.0
 
-            if t == self.time_steps - 1:
-                spike_time = self.layer2.neurons.spike_time
-                spike_time = torch.where(spike_time == float('inf'), 
-                                    torch.tensor(self.time_steps, device=device, dtype=torch.float32), 
-                                    spike_time)
-                final_output = self.layer3(hidden2, t, spike_time)
+# Training Hyperparameters
+LEARNING_RATE = 1e-4
+BATCH_SIZE = 64
+NUM_EPOCHS = 50
+TEST_SPLIT_SIZE = 0.2
+RANDOM_SEED = 42
 
-        # 输出整个时间窗口的平均脉冲比例
-        print(f"Layer1 平均脉冲比例: {spike_sum1 / self.time_steps:.4f}")
-        print(f"Layer2 平均脉冲比例: {spike_sum2 / self.time_steps:.4f}")
+# --- Data Loading and Preparation ---
 
-        if final_output is None:
-            raise ValueError("No output generated")
-        return final_output
+def load_features_from_mat(feature_dir):
+    """Loads features and labels, converting features to float32."""
+    all_features = []
+    all_labels = []
+    mat_files = glob.glob(os.path.join(feature_dir, "*_features.mat"))
+    if not mat_files:
+        print(f"ERROR: No '*_features.mat' files found in {feature_dir}")
+        exit()
+    print(f"Found {len(mat_files)} feature files. Loading...")
+    for fpath in mat_files:
+        try:
+            mat_data = loadmat(fpath)
+            if 'features' in mat_data and 'labels' in mat_data:
+                features = mat_data['features']
+                labels = mat_data['labels'].flatten()
+                if features.shape[1] != INPUT_SIZE: continue
+                if features.shape[0] != len(labels): continue
+                # 使用 float32
+                all_features.append(features.astype(np.float32))
+                all_labels.append(labels)
+        except Exception as e: print(f"Error loading {os.path.basename(fpath)}: {e}. Skip.")
+    if not all_features:
+        print("ERROR: No valid data loaded.")
+        exit()
+    combined_features = np.vstack(all_features)
+    combined_labels = np.concatenate(all_labels)
+    print(f"Loaded total {combined_features.shape[0]} segments.")
+    label_mapping = {-1: 0, 0: 1, 1: 2}
+    mapped_labels = np.array([label_mapping[lbl] for lbl in combined_labels], dtype=np.int64) # Labels remain int64
+    print("Label mapping applied.")
+    print(f"Unique mapped labels: {np.unique(mapped_labels)}")
+    return combined_features, mapped_labels
 
-def train_epoch(model, train_loader, optimizer, criterion, device):
+def ttfs_encode(features, t_min=T_MIN_INPUT, t_max=T_MAX_INPUT):
+    """Encodes normalized features [0, 1] into spike times using TTFS (output float32)."""
+    features = np.clip(features, 0.0, 1.0)
+    spike_times = t_max - features * (t_max - t_min)
+    # 输出 float32 张量
+    return torch.tensor(spike_times, dtype=torch.float32)
+
+class EncodedEEGDataset(Dataset):
+    """Dataset returning TTFS encoded features (float32)."""
+    def __init__(self, encoded_features, labels):
+        # encoded_features should be a float32 tensor
+        self.features = encoded_features
+        self.labels = torch.tensor(labels, dtype=torch.long) # Labels remain LongTensor
+    def __len__(self): return len(self.labels)
+    def __getitem__(self, idx): return self.features[idx], self.labels[idx]
+
+# --- Training and Evaluation Functions ---
+# (No change needed here as they operate on tensors whose dtype is determined by the model/data)
+
+def train_epoch(model, dataloader, criterion, optimizer, device):
+    """Trains the SNN model for one epoch."""
     model.train()
-    total_loss = 0
-    correct = 0
-    total = 0
-    
-    # 创建 tqdm 进度条
-    progress_bar = tqdm(train_loader, desc="Training", leave=True)
-    
-    for batch_idx, (data, target) in enumerate(progress_bar):
-        data, target = data.to(device), target.to(device)
-        data = data * 50
+    running_loss = 0.0
+    correct_predictions = 0
+    total_samples = 0
+    for features, labels in dataloader:
+        # Ensure data sent to device maintains intended dtype (float32 for features)
+        features, labels = features.to(device), labels.to(device)
         optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output, target)
+        outputs, _ = model(features) # Model expects float32, outputs float32
+        loss = criterion(outputs, labels) # Criterion handles input dtype
         loss.backward()
-        grad_norm = sum(p.grad.norm().item() for p in model.parameters() if p.grad is not None)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-        batch_loss = loss.item()
-        pred = output.argmax(dim=1)
-        batch_correct = pred.eq(target).sum().item()
-        batch_total = target.size(0)
-        batch_acc = batch_correct / batch_total
-        total_loss += batch_loss
-        correct += batch_correct
-        total += batch_total
-        progress_bar.set_postfix({
-            'batch_loss': f'{batch_loss:.4f}',
-            'batch_acc': f'{batch_acc:.4f}',
-            'grad_norm': f'{grad_norm:.4f}'
-        })
-        
-        # 更新 tqdm 进度条的描述，实时显示 loss 和 accuracy
-        progress_bar.set_postfix({
-            'batch_loss': f'{batch_loss:.4f}',
-            'batch_acc': f'{batch_acc:.4f}'
-        })
-    
-    # 计算平均 loss 和 accuracy
-    avg_loss = total_loss / len(train_loader)
-    avg_acc = correct / total
-    
-    # 关闭进度条并返回结果
-    progress_bar.close()
-    return avg_loss, avg_acc
+        running_loss += loss.item() * features.size(0)
+        _, predicted = torch.max(outputs.data, 1)
+        total_samples += labels.size(0)
+        correct_predictions += (predicted == labels).sum().item()
+    epoch_loss = running_loss / total_samples
+    epoch_acc = correct_predictions / total_samples
+    return epoch_loss, epoch_acc
 
-def evaluate(model, test_loader, criterion, device):
+def evaluate_model(model, dataloader, criterion, device):
+    """Evaluates the SNN model."""
     model.eval()
-    total_loss = 0
-    correct = 0
-    total = 0
-    
-    # 创建 tqdm 进度条
-    progress_bar = tqdm(test_loader, desc="Evaluating", leave=True)
-    
+    running_loss = 0.0
+    correct_predictions = 0
+    total_samples = 0
+    all_labels, all_preds = [], []
     with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            data = data * 20
-            output = model(data)
-            loss = criterion(output, target)
-            
-            # 计算当前批次的 loss 和 accuracy
-            batch_loss = loss.item()
-            pred = output.argmax(dim=1)
-            batch_correct = pred.eq(target).sum().item()
-            batch_total = target.size(0)
-            batch_acc = batch_correct / batch_total
-            
-            # 累积总计值
-            total_loss += batch_loss
-            correct += batch_correct
-            total += batch_total
-            
-            # 更新 tqdm 进度条的描述，实时显示 loss 和 accuracy
-            progress_bar.set_postfix({
-                'batch_loss': f'{batch_loss:.4f}',
-                'batch_acc': f'{batch_acc:.4f}'
-            })
-    
-    # 计算平均 loss 和 accuracy
-    avg_loss = total_loss / len(test_loader)
-    avg_acc = correct / total
-    
-    # 关闭进度条并返回结果
-    progress_bar.close()
-    return avg_loss, avg_acc
+        for features, labels in dataloader:
+            features, labels = features.to(device), labels.to(device)
+            outputs, _ = model(features) # Model expects float32, outputs float32
+            loss = criterion(outputs, labels)
+            running_loss += loss.item() * features.size(0)
+            _, predicted = torch.max(outputs.data, 1)
+            total_samples += labels.size(0)
+            correct_predictions += (predicted == labels).sum().item()
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())
+    epoch_loss = running_loss / total_samples
+    epoch_acc = correct_predictions / total_samples
+    return epoch_loss, epoch_acc, all_labels, all_preds
 
-def main():
-    # Hyperparameters
-    num_epochs = 20
-    batch_size = 128
-    learning_rate = 0.01
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Load DEAP dataset
-    data_dir = "C:\\Users\\VECTOR\\Desktop\\DeepLearning\\SNN_code\\dataset"
-    label_type = [0, 2]  # [0,2] for valence, [1,2] for arousal
-    
-    train_loader, test_loader = dataset_prepare(
-        window_length_sec=4,
-        n_subjects=26,
-        single_subject=False,
-        load_all=True,
-        only_EEG=True,
-        label_type=label_type,
-        data_dir=data_dir,
-        batch_size=batch_size,
-        normalize=None
-    )
-    # Initialize model
-    model = SNNTTFS().to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    
-    # Training loop
-    best_acc = 0
-    for epoch in range(num_epochs):
-        train_loss, train_acc = train_epoch(model, train_loader, optimizer, criterion, device)
-        test_loss, test_acc = evaluate(model, test_loader, criterion, device)
-        
-        print(f'Epoch: {epoch+1}')
-        print(f'Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}')
-        print(f'Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
-        
-        # Save best model
-        if test_acc > best_acc:
-            best_acc = test_acc
-            torch.save(model.state_dict(), 'best_model.pth')
-            
-        print(f'Best Test Acc: {best_acc:.4f}')
+# --- Main Execution ---
 
 if __name__ == "__main__":
-    main()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # 1. Load Data (Now loads as float32)
+    features, labels = load_features_from_mat(FEATURE_DIR)
+
+    # 2. Split Data
+    X_train_orig, X_test_orig, y_train, y_test = train_test_split(
+        features, labels, test_size=TEST_SPLIT_SIZE, random_state=RANDOM_SEED, stratify=labels
+    )
+    print(f"Training set size: {len(X_train_orig)}")
+    print(f"Testing set size: {len(X_test_orig)}")
+
+    # 3. Normalize Features (Input/Output is float32)
+    scaler = MinMaxScaler()
+    X_train_norm = scaler.fit_transform(X_train_orig)
+    X_test_norm = scaler.transform(X_test_orig)
+    print("Features normalized.")
+
+    # 4. Encode Normalized Features using TTFS (Output is float32)
+    X_train_encoded = ttfs_encode(X_train_norm)
+    X_test_encoded = ttfs_encode(X_test_norm)
+    print("Normalized features encoded into spike times.")
+
+    # 5. Create Datasets and DataLoaders (Handles float32 features)
+    train_dataset = EncodedEEGDataset(X_train_encoded, y_train)
+    test_dataset = EncodedEEGDataset(X_test_encoded, y_test)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+
+    # 6. Initialize SNN Model, Loss, Optimizer
+    # Model will be initialized with float32 parameters from the definitions file
+    # Explicitly set model to float32 just in case, though parameters should already be float32
+    model = SNNModel().to(device).to(torch.float32)
+
+    # Add layers (layers themselves are initialized with float32 now)
+    model.add(SpikingDense(units=HIDDEN_UNITS_1, name='dense1', input_dim=INPUT_SIZE, X_n=X_N_HIDDEN, kernel_initializer='glorot_uniform'))
+    model.add(SpikingDense(units=HIDDEN_UNITS_2, name='dense2', X_n=X_N_HIDDEN, kernel_initializer='glorot_uniform'))
+    model.add(SpikingDense(units=OUTPUT_SIZE, name='output', outputLayer=True, X_n=X_N_OUTPUT, kernel_initializer='glorot_uniform'))
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+
+    print("\n--- Starting SNN Training (float32) ---")
+    start_time = time.time()
+    best_test_acc = 0.0
+
+    # 7. Training Loop
+    for epoch in range(NUM_EPOCHS):
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+        test_loss, test_acc, _, _ = evaluate_model(model, test_loader, criterion, device)
+        print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] | Train Loss: {train_loss:.4f}, Acc: {train_acc:.4f} | Test Loss: {test_loss:.4f}, Acc: {test_acc:.4f}")
+        if test_acc > best_test_acc:
+             best_test_acc = test_acc
+             # torch.save(model.state_dict(), 'best_snn_model_float32.pth')
+
+    end_time = time.time()
+    print(f"\n--- SNN Training Finished ---")
+    print(f"Time: {end_time - start_time:.2f}s | Best Test Acc: {best_test_acc:.4f}")
+
+    # 8. Final Evaluation
+    print("\n--- Final Evaluation on Test Set ---")
+    final_test_loss, final_test_acc, final_labels, final_preds = evaluate_model(model, test_loader, criterion, device)
+    print(f"Final Test Loss: {final_test_loss:.4f}, Final Test Acc: {final_test_acc:.4f}")
+    report_target_names = ['Negative (-1)', 'Neutral (0)', 'Positive (1)']
+    try:
+        print("\nClassification Report:")
+        print(classification_report(final_labels, final_preds, target_names=report_target_names, digits=4, zero_division=0))
+    except ValueError as e: print(f"\nCould not generate report: {e}")
+
+    print("\nScript finished.")

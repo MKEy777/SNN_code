@@ -1,5 +1,3 @@
-# -*- coding: utf-8 -*-
-# 导入所需库
 import numpy as np
 from scipy import signal
 from scipy.linalg import svd
