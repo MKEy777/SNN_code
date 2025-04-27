@@ -1,239 +1,322 @@
 import torch
 import torch.nn as nn
-from typing import Dict, Union, List, Optional
+from typing import Dict, Union, List, Optional, Tuple
 import warnings
 
-# 设置默认浮点类型为 float32
-torch.set_default_dtype(torch.float32)
 
-def quantize_tensor(x, min_val, max_val, num_bits):
+torch.set_default_dtype(torch.float32)
+# 用于安全除法的小 epsilon 值
+EPSILON = 1e-9 # Keep EPSILON as it might be used in core logic beyond checks
+
+def quantize_tensor_like_tf(x, min_val, max_val, num_bits):
     """
-    将输入 x 在[min_val, max_val]范围内量化为 num_bits 位
+    Args:
+        x (torch.Tensor): 输入张量 (float32)。
+        min_val (float): 量化范围最小值。
+        max_val (float): 量化范围最大值。
+        num_bits (int): 量化位数。
+
+    Returns:
+        torch.Tensor: 量化后的张量 (float32)。
     """
-    if num_bits <= 0 or num_bits >= 16:
-        # 如果不需要或位数过高，则直接返回原始张量
-        return x
+    # Removed: if num_bits <= 0 or num_bits >= 16: return x
 
     qmin = 0.
     qmax = float(2**num_bits - 1)
 
-    # 将 min_val, max_val 转为张量并放在相同设备
-    min_val_t = torch.as_tensor(min_val, dtype=x.dtype, device=x.device)
-    max_val_t = torch.as_tensor(max_val, dtype=x.dtype, device=x.device)
+    min_val_t = torch.tensor(min_val, dtype=torch.float32, device=x.device)
+    max_val_t = torch.tensor(max_val, dtype=torch.float32, device=x.device)
 
-    if torch.equal(min_val_t, max_val_t):
-        # 如果区间长度为零则直接裁剪
-        return torch.clamp(x, min=min_val_t, max=max_val_t)
+    # Removed: if torch.le(max_val_t, min_val_t): warnings.warn(...) return torch.clamp(...)
 
-    # 计算量化尺度
     scale = (max_val_t - min_val_t) / (qmax - qmin)
+    # Removed: if torch.abs(scale) < EPSILON: warnings.warn(...) return torch.clamp(...)
 
-    if torch.abs(scale) < 1e-9:
-       warnings.warn(f"Quantization scale is close to zero ({scale.item()}). Clamping input between {min_val_t.item()} and {max_val_t.item()}.")
-       return torch.clamp(x, min=min_val_t, max=max_val_t)
-
-    # 计算零点
     zero_point_float = qmin - min_val_t / scale
-    zero_point = torch.round(zero_point_float)
-    zero_point_clamped = torch.clamp(zero_point, qmin, qmax).to(torch.int64)
+    zero_point_clamped = torch.clamp(torch.round(zero_point_float), qmin, qmax)
+    zero_point_int = zero_point_clamped.to(torch.int64)
 
-    try:
-        # 使用 PyTorch 假量化函数
-        scale_32 = scale.to(torch.float32)
-        x_quantized = torch.fake_quantize_per_tensor_affine(
-            x, scale_32, zero_point_clamped, int(qmin), int(qmax)
-        )
-    except RuntimeError as e:
-         warnings.warn(f"torch.fake_quantize_per_tensor_affine encountered an error: {e}. Falling back.")
-         x_quantized = torch.clamp(x, min=min_val_t, max=max_val_t)
+    # Removed: try-except block, fallback to clamp
+    qmin_int = int(qmin)
+    qmax_int = int(qmax)
+    x_quantized = torch.fake_quantize_per_tensor_affine(x, scale.item(), zero_point_int.item(),
+                                                       qmin_int, qmax_int)
 
     return x_quantized
+
+def call_spiking_pytorch(tj: torch.Tensor, W: torch.Tensor, D_i: torch.Tensor,
+                         t_min_prev: torch.Tensor, t_min: torch.Tensor, t_max: torch.Tensor,
+                         robustness_params: Dict) -> torch.Tensor:
+    """
+    B_i=1, A_i=0, tau_c=1
+
+    Args:
+        tj (torch.Tensor): 输入脉冲时间 (batch_size, input_dim)，应 <= 上一层的 t_max。
+        W (torch.Tensor): 权重矩阵 (input_dim, units)。
+        D_i (torch.Tensor): 可训练的延迟/阈值调整 (units,)。对应论文中定义的阈值vartheta的一部分。
+        t_min_prev (torch.Tensor): 上一层的时间下界 (标量)。
+        t_min (torch.Tensor): 当前层的时间下界 (标量)。
+        t_max (torch.Tensor): 当前层的时间上界 (标量)。
+        robustness_params (Dict): 鲁棒性参数 (量化位数、噪声)。
+
+    Returns:
+        torch.Tensor: 输出脉冲时间 ti (batch_size, units)。非脉冲被设置为 t_max。
+    """
+    current_device = tj.device
+    W = W.to(dtype=torch.float32)
+    D_i = D_i.to(dtype=torch.float32)
+    t_min_prev = t_min_prev.to(dtype=torch.float32, device=current_device)
+    t_min = t_min.to(dtype=torch.float32, device=current_device)
+    t_max = t_max.to(dtype=torch.float32, device=current_device)
+
+    # --- 时间量化 (可选) ---
+    time_bits = robustness_params.get('time_bits', 0)
+    if time_bits != 0:
+        quant_time_max_val = t_min - t_min_prev
+        # Removed: Check if quant_time_max_val > 0
+        relative_tj = tj - t_min_prev
+        quantized_relative_tj = quantize_tensor_like_tf(relative_tj, 0.0, quant_time_max_val.item(), time_bits)
+        tj = t_min_prev + quantized_relative_tj
+
+    # --- 权重量化 (可选) ---
+    weight_bits = robustness_params.get('weight_bits', 0)
+    if weight_bits != 0:
+        w_min = float(robustness_params.get('w_min', torch.min(W.detach()).item()))
+        w_max = float(robustness_params.get('w_max', torch.max(W.detach()).item()))
+        # Removed: Check if w_max > w_min
+        W = quantize_tensor_like_tf(W, w_min, w_max, weight_bits)
+
+    # --- 计算脉冲时间 (基于论文 B1-model, A_i=0, tau_c=1) ---
+    threshold = t_max - t_min - D_i # (units,)
+    ti_theoretical = torch.matmul(tj - t_min, W) + threshold + t_min
+
+    # --- 添加噪声 (可选) ---
+    noise_std_val = robustness_params.get('noise', 0)
+    if noise_std_val != 0:
+        noise_std = torch.tensor(noise_std_val, device=current_device, dtype=torch.float32)
+        ti_theoretical = ti_theoretical + torch.randn_like(ti_theoretical) * noise_std
+
+    # --- 钳位到 t_max ---
+    ti = torch.where(ti_theoretical < t_max, ti_theoretical, t_max)
+
+    return ti
 
 
 class SpikingDense(nn.Module):
     """
-    带脉冲时序编码的全连接层（Dense）
-    - 可选择作为输出层(outputLayer)
-    - 支持权重和时间的量化与噪声注入
+    SpikingDense 层实现，支持可训练的延迟/阈值参数 D_i 和权重 W。
     """
-    def __init__(
-        self, units: int, name: str, X_n: float = 1,
-        outputLayer: bool = False, robustness_params: Dict = {},
-        input_dim: Optional[int] = None, kernel_regularizer=None,
-        kernel_initializer=None
-    ):
+    def __init__(self, units: int, name: str, outputLayer: bool = False,
+                 robustness_params: Dict = {}, input_dim: Optional[int] = None,
+                 kernel_regularizer=None, kernel_initializer=None):
         super(SpikingDense, self).__init__()
         self.units = units
-        self.name = name  # 层的名称
-        self.outputLayer = outputLayer  # 是否为输出层
-        # B_n 用于定义时间窗口宽度: (1 + 0.5) * X_n
-        self.register_buffer('B_n', torch.tensor((1 + 0.5) * X_n))
-        # 初始化时间界限，用于脉冲编码时的前后时间管理
-        self.t_min_prev_cpu = torch.tensor(0.0)
-        self.t_min_cpu = torch.tensor(1.0)
-        self.t_max_cpu = self.t_min_cpu + self.B_n
-
-        self.robustness_params = robustness_params  # 鲁棒性参数: time_bits, weight_bits, noise
-        # alpha 通常用于学习率调节等，但这里不参与梯度更新
-        self.alpha = nn.Parameter(torch.ones(units), requires_grad=False)
+        self.name = name
+        self.outputLayer = outputLayer
+        self.robustness_params = robustness_params
         self.input_dim = input_dim
-        self.kernel_initializer_config = kernel_initializer
+        self.regularizer = kernel_regularizer
+        self.initializer = kernel_initializer
 
-        # D_i: 偏置项，支持时序偏移
-        self.D_i = nn.Parameter(torch.zeros(units), requires_grad=True)
+        self.D_i = nn.Parameter(torch.zeros(units, dtype=torch.float32))
+        self.kernel = None
 
-        # 如果已知输入维度，则立即初始化权重矩阵
-        if input_dim is not None:
-            self.kernel = nn.Parameter(torch.empty(input_dim, units))
-            self._initialize_weights()
+        if self.outputLayer:
+            self.A_i = nn.Parameter(torch.zeros(units, dtype=torch.float32))
+        else:
+            self.A_i = None
+
+        self.register_buffer('t_min_prev', torch.tensor(0.0, dtype=torch.float32))
+        self.register_buffer('t_min', torch.tensor(0.0, dtype=torch.float32))
+        self.register_buffer('t_max', torch.tensor(1.0, dtype=torch.float32))
+
+        self.built = False
+        # Removed: Check on input_dim type/value during init
+        if self.input_dim is not None:
+             self.kernel = nn.Parameter(torch.empty(self.input_dim, self.units, dtype=torch.float32))
+             self._initialize_weights()
+             self.built = True
 
     def _initialize_weights(self):
-        """
-        根据指定的初始化器(kernel_initializer)进行权重初始化，
-        默认使用 Xavier 均匀分布
-        """
-        if hasattr(self, 'kernel'):
-            init_cfg = self.kernel_initializer_config
-            if init_cfg:
-                if isinstance(init_cfg, str) and init_cfg == 'glorot_uniform':
+        """根据 self.initializer 配置初始化 kernel 权重。"""
+        # Removed: Check if self.kernel is None
+
+        init_config = self.initializer
+        if init_config:
+            if isinstance(init_config, str):
+                if init_config == 'glorot_uniform':
                     nn.init.xavier_uniform_(self.kernel)
+                elif init_config == 'glorot_normal':
+                     nn.init.xavier_normal_(self.kernel)
+                # Removed: else block with warning for unknown initializer
                 else:
-                    try:
-                        init_cfg(self.kernel)
-                    except Exception as e:
-                        warnings.warn(f"Layer '{self.name}': Failed to apply custom initializer {e}. Using xavier_uniform_.")
-                        nn.init.xavier_uniform_(self.kernel)
+                    # Defaulting to xavier_uniform if unknown string
+                    nn.init.xavier_uniform_(self.kernel)
+            elif callable(init_config):
+                # Removed: try-except block for custom initializer
+                init_config(self.kernel)
+            # Removed: else block with warning for invalid type
             else:
+                # Defaulting if invalid type
                 nn.init.xavier_uniform_(self.kernel)
+        else:
+            nn.init.xavier_uniform_(self.kernel)
 
-    def build(self, input_shape):
-        """
-        动态在第一次前向传递时根据输入形状构建权重矩阵
-        """
-        if not hasattr(self, 'kernel'):
-            self.input_dim = input_shape[-1]
-            device = self.D_i.device
-            self.kernel = nn.Parameter(torch.empty(self.input_dim, self.units, device=device))
-            print(f"Layer '{self.name}' dynamically built on device: {device} with dtype: {self.kernel.dtype}")
-            self._initialize_weights()
+        with torch.no_grad():
+            self.D_i.zero_()
+        if self.A_i is not None:
+             with torch.no_grad():
+                  self.A_i.zero_()
 
-    def update_time_bounds(self, t_min_prev: torch.Tensor, t_min: torch.Tensor, t_max: torch.Tensor):
-        """
-        在训练时根据上一层输出脉冲时间更新当前层的时间范围
-        """
-        self.t_min_prev_cpu = t_min_prev.cpu().detach()
-        self.t_min_cpu = t_min.cpu().detach()
-        self.t_max_cpu = t_max.cpu().detach()
+    def build(self, input_shape: Union[torch.Size, Tuple, List]):
+        """如果权重尚未创建，则根据第一次输入的形状动态创建权重。"""
+        if self.built:
+            return
+        # Removed: Type/length checks for input_shape
+        if isinstance(input_shape, (tuple, list)):
+             input_shape = torch.Size(input_shape)
+        in_dim = input_shape[-1]
+        # Removed: Check comparing in_dim with self.input_dim
+        # Removed: Check on in_dim value
+        self.input_dim = in_dim
 
-    def forward(self, tj):
-        """
-        前向计算：
-          - 输出层: 直接线性变换
-          - 隐藏层: 调用 call_spiking 实现脉冲时序计算
-        返回: (输出张量, 最小脉冲时间估计)
-        """
-        device = self.D_i.device
-        tj = tj.to(device, dtype=torch.float32)
+        # Removed: Check if D_i is initialized
+        current_device = self.D_i.device
+        self.kernel = nn.Parameter(torch.empty(self.input_dim, self.units, dtype=torch.float32, device=current_device))
 
-        # 若权重未初始化，则先构建
-        if not hasattr(self, 'kernel'):
+        self._initialize_weights()
+        self.built = True
+
+    def set_params(self, t_min_prev: Union[float, torch.Tensor], t_min: Union[float, torch.Tensor]) -> torch.Tensor:
+        """
+        更新层的时间下界 (t_min_prev, t_min)。
+        t_max 将由训练循环根据 min_ti 动态计算和设置。
+
+        Args:
+            t_min_prev: *前*一层的时间下界 (或初始值 0.0)。
+            t_min: 为*此*层计算的时间下界。
+
+        Returns:
+            torch.Tensor: 设置后的当前层的 t_min 值 (已分离梯度)。
+        """
+        if not isinstance(t_min_prev, torch.Tensor):
+            t_min_prev = torch.tensor(t_min_prev, dtype=torch.float32)
+        if not isinstance(t_min, torch.Tensor):
+            t_min = torch.tensor(t_min, dtype=torch.float32)
+        # Removed: Dimension check warning
+        # Removed: Flattening if not scalar
+        # t_min_prev = t_min_prev.flatten()[0]
+        # t_min = t_min.flatten()[0]
+
+        buffer_device = self.t_min_prev.device
+        self.t_min_prev.copy_(t_min_prev.to(buffer_device))
+        self.t_min.copy_(t_min.to(buffer_device))
+
+        return self.t_min.clone().detach()
+
+    def forward(self, tj: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        层的前向传播逻辑。
+
+        Args:
+            tj (torch.Tensor): 输入脉冲时间 (batch_size, input_dim)。应 <= 上一层的 t_max。
+
+        Returns:
+            Tuple[torch.Tensor, Optional[torch.Tensor]]:
+                - output (torch.Tensor): 输出脉冲时间 (隐藏层) 或 logits (输出层)。
+                - min_ti (Optional[torch.Tensor]): 隐藏层计算出的最小有限脉冲时间，否则为 None。
+        """
+        # Removed: Check if not built (moved build call earlier)
+        if not self.built:
             self.build(tj.shape)
+        # Removed: Check if kernel is None
 
-        # 将 CPU 存储的时间边界拉到当前设备
-        t_min_prev_dev = self.t_min_prev_cpu.to(device)
-        t_min_dev = self.t_min_cpu.to(device)
-        t_max_dev = self.t_max_cpu.to(device)
+        current_device = self.D_i.device
+        tj = tj.to(current_device, dtype=torch.float32)
+
+        t_min_prev_dev = self.t_min_prev
+        t_min_dev = self.t_min
+        t_max_dev = self.t_max
 
         min_ti_output = None
 
         if self.outputLayer:
-            # 输出层: 简化的线性时序映射
-            W_mult_x = torch.matmul(t_min_dev - tj, self.kernel)
-            output = W_mult_x + self.D_i
+            # Removed: Check if self.A_i is None
+            weighted_inputs = torch.matmul(t_min_dev - tj, self.kernel)
+            time_diff = t_min_dev - t_min_prev_dev
+            bias_term = self.A_i * time_diff
+            output = weighted_inputs + bias_term
+            min_ti_output = None
         else:
-            # 隐藏层: 调用脉冲计算核心函数
-            output = call_spiking(
-                tj, self.kernel, self.D_i,
-                t_min_prev_dev, t_min_dev, t_max_dev,
-                self.robustness_params
-            )
-            # 记录最小脉冲时间（用于动态调整时间边界）
-            if torch.is_tensor(output) and output.numel() > 0:
-                try:
-                    min_ti_output = torch.min(output.detach()).clone()
-                except RuntimeError:
-                    min_ti_output = torch.tensor(float('inf'), device=device)
+            output = call_spiking_pytorch(tj, self.kernel, self.D_i, t_min_prev_dev,
+                                          t_min_dev, t_max_dev, self.robustness_params)
+
+            finite_spikes_mask = torch.isfinite(output) & (output < t_max_dev)
+            finite_spikes = output[finite_spikes_mask]
+            if finite_spikes.numel() > 0:
+                min_ti_output = torch.min(finite_spikes).detach()
             else:
-                min_ti_output = torch.tensor(float('inf'), device=device)
+                 min_ti_output = t_max_dev.clone().detach()
+
+        output = output.to(current_device)
+        if min_ti_output is not None:
+             min_ti_output = min_ti_output.to(current_device)
 
         return output, min_ti_output
 
 
 class SNNModel(nn.Module):
     """
-    构建脉冲神经网络模型，按顺序管理多个 SpikingDense 层
+    顺序 SNN 模型，由层组成 (例如 SpikingDense)。
     """
     def __init__(self):
         super(SNNModel, self).__init__()
         self.layers_list = nn.ModuleList()
 
-    def add(self, layer):
-        # 添加层到模型
+    def add(self, layer: nn.Module):
+        """向模型添加层。"""
+        # Removed: Type check for layer
         self.layers_list.append(layer.to(dtype=torch.float32))
 
-    def forward(self, x):
-        # 确定模型当前运行设备
-        current_device = x.device if len(list(self.parameters())) == 0 else next(self.parameters()).device
-        x = x.to(current_device, dtype=torch.float32)
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[Optional[torch.Tensor]]]:
+        """
+        模型的前向传播。
 
+        Args:
+            x (torch.Tensor): 输入数据 (例如，编码后的脉冲时间)。
+
+        Returns:
+            Tuple[torch.Tensor, List[Optional[torch.Tensor]]]:
+                - final_output (torch.Tensor): 最后一层的输出 (logits)。
+                - min_ti_list (List[Optional[torch.Tensor]]): 包含每个*隐藏* SpikingDense 层
+                  计算出的最小有限脉冲时间的列表 (可能是 t_max)。
+        """
+        current_input = x
         min_ti_list = []
-        # 依次调用每层的前向输出
-        for layer in self.layers_list:
-            layer = layer.to(current_device)
+
+        target_device = x.device
+        if len(self.layers_list) > 0:
+             try:
+                  first_param = next(self.parameters())
+                  target_device = first_param.device
+             except StopIteration:
+                  try:
+                      first_buffer = next(self.buffers())
+                      target_device = first_buffer.device
+                  except StopIteration:
+                      pass # Keep device as x.device if no params/buffers
+
+        current_input = current_input.to(target_device, dtype=torch.float32)
+
+        for i, layer in enumerate(self.layers_list):
+            layer = layer.to(target_device)
+
             if isinstance(layer, SpikingDense):
-                x, min_ti = layer(x)
+                current_input, min_ti = layer(current_input)
                 if not layer.outputLayer:
-                    min_ti_list.append(min_ti if min_ti is not None else torch.tensor(float('inf'), device=current_device))
+                    min_ti_list.append(min_ti)
             else:
-                x = layer(x)
-        return x, min_ti_list
+                current_input = layer(current_input)
 
-
-def call_spiking(tj, W, D_i, t_min_prev, t_min, t_max, robustness_params):
-    """
-    脉冲计算核心函数：
-      1. 时间量化 (time_bits)
-      2. 权重量化 (weight_bits)
-      3. 线性时序映射 + 偏置
-      4. 添加高斯噪声模拟不确定性
-    """
-    device = tj.device
-    # 1) 时间量化
-    time_bits = robustness_params.get('time_bits', 0)
-    if time_bits > 0:
-        rel_tj = tj - t_min_prev
-        quant_max = t_min - t_min_prev
-        rel_tj_q = quantize_tensor(rel_tj, 0.0, quant_max, time_bits)
-        tj = rel_tj_q + t_min_prev
-
-    # 2) 权重量化
-    weight_bits = robustness_params.get('weight_bits', 0)
-    if weight_bits > 0:
-        w_min = float(robustness_params.get('w_min', torch.min(W.detach()).item()))
-        w_max = float(robustness_params.get('w_max', torch.max(W.detach()).item()))
-        W = quantize_tensor(W, w_min, w_max, weight_bits)
-
-    # 3) 计算脉冲时间 ti
-    threshold = t_max - t_min - D_i
-    rel_tj2 = tj - t_min
-    ti_rel = torch.matmul(rel_tj2, W)
-    ti = ti_rel + threshold + t_min
-    ti = torch.clamp(ti, min=t_min, max=t_max)
-
-    # 4) 添加噪声
-    noise_std = robustness_params.get('noise', 0)
-    if noise_std != 0:
-        noise = torch.randn_like(ti) * noise_std
-        ti = torch.clamp(ti + noise, min=t_min, max=t_max)
-
-    return ti
+        final_output = current_input
+        return final_output, min_ti_list
