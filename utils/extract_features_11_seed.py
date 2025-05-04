@@ -11,14 +11,14 @@ FEATURE_NAMES = [
 ]
 
 INPUT_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\PerSession_MAT"
-OUTPUT_DIR_FEATURES = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\Individual_Features_Minimal"
+OUTPUT_DIR_FEATURES = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\Individual_Features"
 FS = 200
 N_FEATURES_PER_COMBINATION = 11
 N_BANDS = 4
 N_CHANNELS = 62
 EXPECTED_TOTAL_FEATURES = N_BANDS * N_CHANNELS * N_FEATURES_PER_COMBINATION
 
-# --- Feature Calculation Functions (Minimal) ---
+# --- Feature Calculation Functions ---
 
 def calculate_mean_ptp(data, sub_window_size=FS):
     valid_data = data[np.isfinite(data)]
