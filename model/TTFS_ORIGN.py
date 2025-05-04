@@ -3,7 +3,6 @@ import torch.nn as nn
 from typing import Dict, Union, List, Optional, Tuple
 import warnings
 
-
 torch.set_default_dtype(torch.float32)
 EPSILON = 1e-9
 
@@ -11,8 +10,6 @@ def call_spiking_layer(tj: torch.Tensor, W: torch.Tensor, D_i: torch.Tensor,
                        t_min_prev: torch.Tensor, t_min: torch.Tensor, t_max: torch.Tensor,
                        robustness_params: Dict = {}) -> torch.Tensor:
     """
-    根据作者参考实现，计算脉冲时间，假设 B1 模型 (tau_c=1, B_i=1, A_i=0)。
-
     参数:
         tj (torch.Tensor): 输入脉冲时间，形状 (batch_size, input_dim)。
         W (torch.Tensor): 权重矩阵，形状 (input_dim, units)。
@@ -42,9 +39,6 @@ def call_spiking_layer(tj: torch.Tensor, W: torch.Tensor, D_i: torch.Tensor,
     return ti
 
 class SpikingDense(nn.Module):
-    """
-    与作者 B1 模型实现对齐的全连接脉冲层。
-    """
     def __init__(self, units: int, name: str, outputLayer: bool = False,
                  robustness_params: Dict = {}, input_dim: Optional[int] = None,
                  kernel_regularizer=None,
@@ -53,7 +47,7 @@ class SpikingDense(nn.Module):
         self.units = units
         self.name = name
         self.outputLayer = outputLayer
-        self.robustness_params = robustness_params  # 保存以供后续使用
+        self.robustness_params = robustness_params
         self.input_dim = input_dim
         self.initializer = kernel_initializer
 
@@ -61,23 +55,19 @@ class SpikingDense(nn.Module):
         self.D_i = nn.Parameter(torch.zeros(units, dtype=torch.float32))  # 阈值调整
         self.kernel = None  # 权重矩阵 W
 
-        # 注册时间边界缓冲区（非训练状态）
+        # 注册时间边界缓冲区
         self.register_buffer('t_min_prev', torch.tensor(0.0, dtype=torch.float32))
         self.register_buffer('t_min', torch.tensor(0.0, dtype=torch.float32))
         self.register_buffer('t_max', torch.tensor(1.0, dtype=torch.float32))
 
         self.built = False
         if self.input_dim is not None:
-            # 如果已知输入维度，则立即创建并初始化核
             self.kernel = nn.Parameter(torch.empty(self.input_dim, self.units, dtype=torch.float32))
             self._initialize_weights()
             self.built = True
 
     def _initialize_weights(self):
         """根据 self.initializer 初始化 kernel 权重。"""
-        if self.kernel is None:
-            raise RuntimeError("初始化前未创建 kernel。")
-
         init_config = self.initializer
         if init_config:
             if isinstance(init_config, str):
@@ -86,19 +76,12 @@ class SpikingDense(nn.Module):
                 elif init_config == 'glorot_normal':
                     nn.init.xavier_normal_(self.kernel)
                 else:
-                    warnings.warn(f"未知初始化方式 '{init_config}'，使用 glorot_uniform。")
                     nn.init.xavier_uniform_(self.kernel)
             elif callable(init_config):
-                try:
-                    init_config(self.kernel)
-                except Exception as e:
-                    warnings.warn(f"自定义初始化失败: {e}，使用 glorot_uniform。")
-                    nn.init.xavier_uniform_(self.kernel)
+                init_config(self.kernel)
             else:
-                warnings.warn(f"初始化类型 '{type(init_config)}' 无效，使用 glorot_uniform。")
                 nn.init.xavier_uniform_(self.kernel)
         else:
-            # 默认初始化
             nn.init.xavier_uniform_(self.kernel)
 
         # 将 D_i 清零
@@ -115,12 +98,7 @@ class SpikingDense(nn.Module):
             input_shape = torch.Size(input_shape)
         in_dim = input_shape[-1]
 
-        if self.input_dim is not None and self.input_dim != in_dim:
-            warnings.warn(f"build() 中输入维度不匹配。期望 {self.input_dim}，实际 {in_dim}。")
-
         self.input_dim = in_dim
-        if self.input_dim <= 0:
-            raise ValueError(f"推断到的输入维度无效: {self.input_dim}")
 
         # 从已有参数或缓冲区获取设备信息
         try:
@@ -152,12 +130,6 @@ class SpikingDense(nn.Module):
         self.t_min.copy_(t_min.to(buffer_device))
         self.t_max.copy_(t_max.to(buffer_device))
 
-        # 检查时间窗口是否折叠
-        if torch.any(self.t_max <= self.t_min):
-            warnings.warn(f"层 {self.name}: t_max ({self.t_max.item():.4f}) <= t_min ({self.t_min.item():.4f})。可能有问题。")
-        if torch.any(self.t_min < self.t_min_prev):
-            warnings.warn(f"层 {self.name}: t_min ({self.t_min.item():.4f}) < t_min_prev ({self.t_min_prev.item():.4f})。可能有问题。")
-
     def forward(self, tj: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         前向传播。
@@ -172,8 +144,6 @@ class SpikingDense(nn.Module):
         """
         if not self.built:
             self.build(tj.shape)
-        if self.kernel is None:
-            raise RuntimeError(f"层 {self.name}: forward 前 kernel 未初始化。")
 
         current_device = self.D_i.device
         tj = tj.to(current_device, dtype=torch.float32)
@@ -185,11 +155,10 @@ class SpikingDense(nn.Module):
         min_ti_output = None
 
         if self.outputLayer:
-            # --- 输出层逻辑，与作者 TF 代码一致 ---
+            # --- 输出层逻辑 ---
             W_mult_x = torch.matmul(t_min_dev - tj, self.kernel)
 
             time_diff = t_min_dev - t_min_prev_dev
-            # 为避免除零
             safe_time_diff = torch.where(time_diff == 0, torch.tensor(EPSILON, device=current_device), time_diff)
 
             # 计算 alpha，基于 D_i
@@ -228,8 +197,6 @@ class SNNModel(nn.Module):
 
     def add(self, layer: nn.Module):
         """向模型中添加层。"""
-        if not isinstance(layer, nn.Module):
-            raise TypeError(f"期望 nn.Module，但收到 {type(layer)}")
         self.layers_list.append(layer.to(dtype=torch.float32))
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, List[Optional[torch.Tensor]]]:
@@ -272,7 +239,6 @@ class SNNModel(nn.Module):
             elif isinstance(layer, nn.Flatten):
                 current_input = layer(current_input)
             else:
-                warnings.warn(f"SNNModel 前向传播中遇到不支持的层类型 {type(layer)}。")
                 current_input = layer(current_input)
 
         final_output = current_input
