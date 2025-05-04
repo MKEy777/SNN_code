@@ -103,7 +103,7 @@ def process_subject_data(filepath, fs=128, window_sec=4, step_sec=2, only_EEG=Tr
 if __name__ == '__main__':
     # 定义数据目录和输出目录
     data_dir = "C:\\Users\\VECTOR\\Desktop\\DeepLearning\\SNN_code\\dataset"
-    output_dir = "C:\\Users\\VECTOR\\Desktop\\DeepLearning\\SNN_code\\deap_features_NoFilter" 
+    output_dir = "C:\Users\VECTOR\Desktop\DeepLearning\SNN_code\PerSession_MAT_Deap_nofilter" 
 
     # 定义处理参数
     fs = 128

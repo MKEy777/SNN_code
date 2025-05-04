@@ -1,3 +1,4 @@
+# 导入必要的库
 import os
 import glob
 import numpy as np
@@ -7,64 +8,65 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 from scipy.io import loadmat
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import classification_report
+from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import MinMaxScaler
 from typing import Dict, Union, List, Optional, Tuple
 import time
 import matplotlib.pyplot as plt
-
 from model.TTFS_ORIGN import SNNModel, SpikingDense
 
-FEATURE_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\Individual_Features_Minimal"
-
-INPUT_SIZE = 2728
-HIDDEN_UNITS_1 = 512
-HIDDEN_UNITS_2 = 128
-OUTPUT_SIZE = 3
-T_MIN_INPUT = 0.0
-T_MAX_INPUT = 1.0
-
+# 配置参数
+FEATURE_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN_code\deap_features"
+INPUT_SIZE = 352
+HIDDEN_UNITS = [256, 128, 64]
+OUTPUT_SIZE = 2
+T_MIN_INPUT, T_MAX_INPUT = 0.0, 1.0
 LEARNING_RATE = 5e-4
+WEIGHT_DECAY = 0
 BATCH_SIZE = 16
 NUM_EPOCHS = 100
 TEST_SPLIT_SIZE = 0.2
 RANDOM_SEED = 42
-EARLY_STOPPING_PATIENCE = 10
 TRAINING_GAMMA = 10.0
 
+# 从 .mat 文件加载特征数据
 def load_features_from_mat(feature_dir):
-    all_features = []
-    all_labels = []
-    mat_files = glob.glob(os.path.join(feature_dir, "*_features_minimal.mat"))
+    mat_files = glob.glob(os.path.join(feature_dir, "s*_direct_features.mat"))
+    if not mat_files:
+        mat_files = glob.glob(os.path.join(feature_dir, "*_features.mat"))
 
     print(f"找到 {len(mat_files)} 个特征文件。正在加载...")
+    all_f, all_l, first = [], [], True
+    global INPUT_SIZE
 
+    loaded_count = 0
     for fpath in mat_files:
-        mat_data = loadmat(fpath)
-        features = mat_data['features']
-        labels = mat_data['labels'].flatten()
-        all_features.append(features.astype(np.float32))
-        all_labels.append(labels)
+        data = loadmat(fpath)
+        feats = data['features']
+        labs = data['labels']
 
-    combined_features = np.vstack(all_features)
-    combined_labels = np.concatenate(all_labels)
-    print(f"总共加载了 {combined_features.shape[0]} 个数据段。")
+        if first:
+            INPUT_SIZE = feats.shape[1]
+            print(f"从第一个文件推断输入大小: {INPUT_SIZE}")
+            first = False
 
-    label_mapping = {-1: 0, 0: 1, 1: 2}
-    mapped_labels = np.array([label_mapping[lbl] for lbl in combined_labels], dtype=np.int64)
-    print("标签映射已应用: {-1: 0 (负面), 0: 1 (中性), 1: 2 (正面)}")
-    unique_mapped_labels = np.unique(mapped_labels)
-    print(f"唯一的映射后标签值: {unique_mapped_labels}")
+        all_f.append(feats.astype(np.float32))
+        all_l.append(labs[:, 0].astype(np.int64)) # 仅使用效价标签
+        loaded_count += 1
 
-    return combined_features, mapped_labels
+    print(f"成功加载了 {loaded_count} 个文件的有效数据。")
+    return np.vstack(all_f), np.concatenate(all_l)
 
+# TTFS 编码函数
 def ttfs_encode(features: np.ndarray, t_min: float = T_MIN_INPUT, t_max: float = T_MAX_INPUT) -> torch.Tensor:
     if isinstance(features, torch.Tensor):
         features = features.cpu().numpy()
     features = np.clip(features, 0.0, 1.0)
+    features = np.nan_to_num(features, nan=0.5)
     spike_times = t_max - features * (t_max - t_min)
     return torch.tensor(spike_times, dtype=torch.float32)
 
+# PyTorch 数据集类
 class EncodedEEGDataset(Dataset):
     def __init__(self, encoded_features: torch.Tensor, labels: np.ndarray):
         self.features = encoded_features.to(dtype=torch.float32)
@@ -76,6 +78,7 @@ class EncodedEEGDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.features[idx], self.labels[idx]
 
+# 训练一个 Epoch 的函数
 def train_epoch(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
                 optimizer: optim.Optimizer, device: torch.device, epoch: int,
                 gamma: float = TRAINING_GAMMA) -> Tuple[float, float]:
@@ -86,8 +89,10 @@ def train_epoch(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
 
     for batch_idx, (features, labels) in enumerate(dataloader):
         features, labels = features.to(device), labels.to(device)
+
         outputs, min_ti_list = model(features)
         loss = criterion(outputs, labels)
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -105,8 +110,8 @@ def train_epoch(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
                     if not layer.outputLayer:
                         if k < len(min_ti_list) and min_ti_list[k] is not None:
                             min_ti_current = min_ti_list[k].squeeze()
-                            base_interval = torch.tensor(1.0, dtype=torch.float32, device=device)
                             current_layer_t_max = layer.t_max.clone().detach()
+                            base_interval = torch.tensor(1.0, dtype=torch.float32, device=device)
                             dynamic_term = gamma * (current_layer_t_max - min_ti_current)
                             dynamic_term = torch.clamp(dynamic_term, min=0.0)
                             new_t_max = current_t_min + torch.maximum(base_interval, dynamic_term)
@@ -130,6 +135,8 @@ def train_epoch(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
 
     return epoch_loss, epoch_acc
 
+# 评估模型的函数
+@torch.no_grad()
 def evaluate_model(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
                    device: torch.device) -> Tuple[float, float, List, List]:
     model.eval()
@@ -138,52 +145,53 @@ def evaluate_model(model: SNNModel, dataloader: DataLoader, criterion: nn.Module
     total_samples = 0
     all_labels, all_preds = [], []
 
-    with torch.no_grad():
-        for features, labels in dataloader:
-            features, labels = features.to(device), labels.to(device)
-            outputs, _ = model(features)
-            loss = criterion(outputs, labels)
+    for features, labels in dataloader:
+        features, labels = features.to(device), labels.to(device)
+        outputs, _ = model(features)
+        loss = criterion(outputs, labels)
 
-            running_loss += loss.item() * features.size(0)
-            _, predicted = torch.max(outputs.data, 1)
-            correct_predictions += (predicted == labels).sum().item()
-            total_samples += labels.size(0)
+        running_loss += loss.item() * features.size(0)
+        _, predicted = torch.max(outputs.data, 1)
+        correct_predictions += (predicted == labels).sum().item()
+        total_samples += labels.size(0)
 
-            all_labels.extend(labels.cpu().numpy())
-            all_preds.extend(predicted.cpu().numpy())
+        all_labels.extend(labels.cpu().numpy())
+        all_preds.extend(predicted.cpu().numpy())
 
     epoch_loss = running_loss / total_samples
     epoch_acc = correct_predictions / total_samples
 
     return epoch_loss, epoch_acc, all_labels, all_preds
 
-def plot_history(train_losses, test_losses, train_accuracies, test_accuracies):
-    epochs = range(1, len(train_losses) + 1)
-
+# 绘制训练历史的函数
+def plot_history(tr_losses, te_losses, tr_accs, te_accs, label_name="Valence"):
+    epochs = range(1, len(tr_losses) + 1)
     plt.figure(figsize=(12, 5))
-
     plt.subplot(1, 2, 1)
-    plt.plot(epochs, train_losses, 'bo-', label='训练损失 (Training Loss)')
-    plt.plot(epochs, test_losses, 'ro-', label='测试损失 (Test Loss)')
-    plt.title('训练和测试损失 (Training and Test Loss)')
-    plt.xlabel('Epochs')
+    plt.plot(epochs, tr_losses, 'bo-', label='训练损失 (Training Loss)')
+    plt.plot(epochs, te_losses, 'ro-', label='测试损失 (Test Loss)')
+    plt.title(f'{label_name} 损失 (Loss)')
+    plt.xlabel('轮次 (Epochs)')
     plt.ylabel('损失 (Loss)')
     plt.legend()
     plt.grid(True)
 
     plt.subplot(1, 2, 2)
-    plt.plot(epochs, train_accuracies, 'bo-', label='训练准确率 (Training Accuracy)')
-    plt.plot(epochs, test_accuracies, 'ro-', label='测试准确率 (Test Accuracy)')
-    plt.title('训练和测试准确率 (Training and Test Accuracy)')
-    plt.xlabel('Epochs')
+    plt.plot(epochs, tr_accs, 'bo-', label='训练准确率 (Training Acc)')
+    plt.plot(epochs, te_accs, 'ro-', label='测试准确率 (Test Acc)')
+    plt.title(f'{label_name} 准确率 (Accuracy)')
+    plt.xlabel('轮次 (Epochs)')
     plt.ylabel('准确率 (Accuracy)')
     plt.legend()
     plt.grid(True)
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig(f"history_{label_name}_dynamic_TTFS.png")
+    print(f"训练历史图已保存为: history_{label_name}_dynamic_TTFS.png")
 
+# 主执行块
 if __name__ == "__main__":
+    # 设置随机种子和设备
     torch.manual_seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
     if torch.cuda.is_available():
@@ -192,19 +200,26 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用的设备: {device}")
 
+    # 加载数据
     print("--- 开始加载数据 ---")
     features, labels = load_features_from_mat(FEATURE_DIR)
     print(f"成功加载数据。特征形状: {features.shape}, 标签形状: {labels.shape}")
+    unique_labels, counts = np.unique(labels, return_counts=True)
+    print(f"标签分布: {dict(zip(unique_labels, counts))}")
     print("--- 数据加载完成 ---")
 
+    # 划分训练集和测试集
     print("--- 开始划分数据集 ---")
     X_train_orig, X_test_orig, y_train, y_test = train_test_split(
-        features, labels, test_size=TEST_SPLIT_SIZE, random_state=RANDOM_SEED, stratify=labels
+        features, labels, test_size=TEST_SPLIT_SIZE,
+        random_state=RANDOM_SEED,
+        stratify=labels
     )
     print(f"训练集大小: {len(X_train_orig)}")
     print(f"测试集大小: {len(X_test_orig)}")
     print("--- 数据集划分完成 ---")
 
+    # 特征归一化
     print("--- 开始特征归一化 ---")
     scaler = MinMaxScaler(feature_range=(0, 1))
     X_train_norm = scaler.fit_transform(X_train_orig)
@@ -212,6 +227,7 @@ if __name__ == "__main__":
     print("特征已归一化到 [0, 1]。")
     print("--- 特征归一化完成 ---")
 
+    # TTFS 编码
     print("--- 开始 TTFS 编码 ---")
     X_train_encoded = ttfs_encode(X_train_norm, t_min=T_MIN_INPUT, t_max=T_MAX_INPUT)
     X_test_encoded = ttfs_encode(X_test_norm, t_min=T_MIN_INPUT, t_max=T_MAX_INPUT)
@@ -219,6 +235,7 @@ if __name__ == "__main__":
     print(f"编码后训练数据形状: {X_train_encoded.shape}")
     print("--- TTFS 编码完成 ---")
 
+    # 创建数据集和数据加载器
     print("--- 创建 PyTorch 数据集和加载器 ---")
     train_dataset = EncodedEEGDataset(X_train_encoded, y_train)
     test_dataset = EncodedEEGDataset(X_test_encoded, y_test)
@@ -227,25 +244,32 @@ if __name__ == "__main__":
     test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=num_workers, pin_memory=torch.cuda.is_available())
     print("--- 数据集和加载器创建完成 ---")
 
+    # 构建 SNN 模型
     print("--- 构建 SNN 模型 ---")
     model = SNNModel()
-    model.add(SpikingDense(units=HIDDEN_UNITS_1, name='dense_1', input_dim=INPUT_SIZE,
-                           outputLayer=False, kernel_initializer='glorot_uniform'))
-    model.add(SpikingDense(units=HIDDEN_UNITS_2, name='dense_2',
-                           outputLayer=False, kernel_initializer='glorot_uniform'))
-    model.add(SpikingDense(units=OUTPUT_SIZE, name='dense_output', outputLayer=True,
-                           kernel_initializer='glorot_uniform'))
+    current_dim = INPUT_SIZE
+    for i, hidden_unit in enumerate(HIDDEN_UNITS):
+        model.add(SpikingDense(units=hidden_unit, name=f'dense_{i+1}', input_dim=current_dim,
+                               outputLayer=False, kernel_initializer='glorot_uniform'))
+        current_dim = hidden_unit
+    model.add(SpikingDense(units=OUTPUT_SIZE, name='dense_output', input_dim=current_dim,
+                           outputLayer=True, kernel_initializer='glorot_uniform'))
 
     print("SNN 模型结构:")
     print(model)
     model.to(device)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"模型可训练参数数量: {total_params}")
     print("--- SNN 模型构建完成 ---")
 
+    # 定义损失函数和优化器
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
     print(f"损失函数: {criterion}")
     print(f"优化器: {optimizer}")
 
+    # 初始化模型时间参数
+    print("--- 初始化模型时间参数 ---")
     with torch.no_grad():
         init_t_min_prev = torch.tensor(T_MIN_INPUT, dtype=torch.float32, device=device)
         init_t_min = torch.tensor(T_MAX_INPUT, dtype=torch.float32, device=device)
@@ -257,17 +281,16 @@ if __name__ == "__main__":
                 init_t_min_prev = init_t_min.clone()
                 init_t_min = init_t_max.clone()
                 init_t_max = init_t_min + torch.tensor(1.0, dtype=torch.float32, device=device)
+    print("--- 时间参数初始化完成 ---")
 
-    print(f"\n--- 开始 SNN 训练 ---")
+    # 开始训练
+    print(f"\n--- 开始 SNN 训练 (共 {NUM_EPOCHS} 轮) ---")
     start_time = time.time()
-    best_test_acc = 0.0
-    epochs_without_improvement = 0
 
-    train_losses = []
-    test_losses = []
-    train_accuracies = []
-    test_accuracies = []
+    train_losses, test_losses = [], []
+    train_accuracies, test_accuracies = [], []
 
+    # 训练循环
     for epoch in range(NUM_EPOCHS):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, epoch,
                                             gamma=TRAINING_GAMMA)
@@ -278,39 +301,31 @@ if __name__ == "__main__":
         test_losses.append(test_loss)
         test_accuracies.append(test_acc)
 
-        print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] | 训练 损失: {train_loss:.4f}, Acc: {train_acc:.4f} | "
-              f"测试 损失: {test_loss:.4f}, Acc: {test_acc:.4f}")
-
-        if test_acc > best_test_acc:
-            best_test_acc = test_acc
-            print(f"    * 新的最佳测试准确率: {best_test_acc:.4f}")
-            epochs_without_improvement = 0
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
-                print(f"\n测试准确率连续 {EARLY_STOPPING_PATIENCE} 轮没有改进。触发早停。")
-                break
+        print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] | 训练 Loss: {train_loss:.4f}, Acc: {train_acc:.4f} | "
+              f"测试 Loss: {test_loss:.4f}, Acc: {test_acc:.4f}")
 
     end_time = time.time()
-    print(f"\n--- SNN 训练完成 (或提前停止) ---")
+    print(f"\n--- SNN 训练完成 ---")
     print(f"总耗时: {end_time - start_time:.2f} 秒")
-    print(f"训练期间最佳测试准确率: {best_test_acc:.4f}")
 
-    if train_losses and test_losses and train_accuracies and test_accuracies:
+    # 绘制训练历史
+    if train_losses:
         print("\n--- 生成训练历史图 ---")
-        plot_history(train_losses, test_losses, train_accuracies, test_accuracies)
+        plot_history(train_losses, test_losses, train_accuracies, test_accuracies, label_name="Valence")
     else:
-        print("\n未能收集到足够的训练历史数据以生成图表。")
+        print("\n未能收集到训练历史数据。")
 
+    # 最终评估
     print("\n--- 在测试集上进行最终评估 ---")
     final_test_loss, final_test_acc, final_labels, final_preds = evaluate_model(model, test_loader, criterion, device)
 
     print(f"最终测试损失: {final_test_loss:.4f}")
     print(f"最终测试准确率: {final_test_acc:.4f}")
 
+    # 生成分类报告
     if final_labels and final_preds:
-        report_target_names = ['负面 (0)', '中性 (1)', '正面 (2)']
-        print("\n分类报告 (测试集):")
+        report_target_names = ['Valence Low (0)', 'Valence High (1)']
+        print("\n分类报告 (测试集 - Valence):")
         print(classification_report(final_labels, final_preds,
                                     target_names=report_target_names,
                                     digits=4,
