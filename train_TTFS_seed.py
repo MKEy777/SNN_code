@@ -1,21 +1,20 @@
-import os  # 操作系统相关操作
-import glob  # 文件模式匹配
-import numpy as np  # 数组计算
-import torch  # PyTorch 深度学习库
-import torch.nn as nn  # 神经网络模块
-import torch.optim as optim  # 优化器
-from torch.utils.data import Dataset, DataLoader  # 数据集和加载器
-from scipy.io import loadmat  # 加载 .mat 文件
-from sklearn.model_selection import train_test_split  # 划分训练/测试集
-from sklearn.metrics import classification_report  # 分类报告
-from sklearn.preprocessing import MinMaxScaler  # 归一化
-from typing import Dict, Union, List, Optional, Tuple  # 类型注解
-import time  # 计时
-import matplotlib.pyplot as plt  # 绘图
+import os 
+import glob 
+import numpy as np  
+import torch  
+import torch.nn as nn 
+import torch.optim as optim  
+from torch.utils.data import Dataset, DataLoader 
+from scipy.io import loadmat  
+from sklearn.model_selection import train_test_split 
+from sklearn.metrics import classification_report  
+from sklearn.preprocessing import MinMaxScaler  
+from typing import Dict, Union, List, Optional, Tuple 
+import time  
+import matplotlib.pyplot as plt  
 
-from model.TTFS_ORIGN import SNNModel, SpikingDense  # 导入自定义 SNN 模型类
+from model.TTFS_ORIGN import SNNModel, SpikingDense 
 
-# 特征文件夹路径
 FEATURE_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\Individual_Features"
 
 # 网络结构与训练参数定义
@@ -181,20 +180,20 @@ def plot_history(train_losses, test_losses, train_accuracies, test_accuracies):
     plt.figure(figsize=(12, 5))
 
     plt.subplot(1, 2, 1)
-    plt.plot(epochs, train_losses, 'bo-', label='训练损失 (Training Loss)')
-    plt.plot(epochs, test_losses, 'ro-', label='测试损失 (Test Loss)')
-    plt.title('训练和测试损失')
+    plt.plot(epochs, train_losses, 'bo-', label='Training Loss')
+    plt.plot(epochs, test_losses, 'ro-', label='Test Loss')
+    plt.title('Training and test Loss')
     plt.xlabel('Epochs')
-    plt.ylabel('损失')
+    plt.ylabel('loss')
     plt.legend()
     plt.grid(True)
 
     plt.subplot(1, 2, 2)
-    plt.plot(epochs, train_accuracies, 'bo-', label='训练准确率')
-    plt.plot(epochs, test_accuracies, 'ro-', label='测试准确率')
-    plt.title('训练和测试准确率')
+    plt.plot(epochs, train_accuracies, 'bo-', label='Training Accuracy')
+    plt.plot(epochs, test_accuracies, 'ro-', label='Test Accuracy')
+    plt.title('Train and test accuracy')
     plt.xlabel('Epochs')
-    plt.ylabel('准确率')
+    plt.ylabel('Accuracy')
     plt.legend()
     plt.grid(True)
 

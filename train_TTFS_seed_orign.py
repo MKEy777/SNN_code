@@ -19,8 +19,8 @@ from model.TTFS_ORIGN import SNNModel, SpikingDense
 # --- 参数设置 ---
 FEATURE_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\Individual_Features_NoBandpass_Fixed" # 特征文件目录
 INPUT_SIZE = 682 # 输入特征维度 (62通道 * 11特征/通道)
-HIDDEN_UNITS_1 = 512 # 第一个隐藏层单元数
-HIDDEN_UNITS_2 = 128 # 第二个隐藏层单元数
+HIDDEN_UNITS_1 = 256 # 第一个隐藏层单元数
+HIDDEN_UNITS_2 = 64 # 第二个隐藏层单元数
 OUTPUT_SIZE = 3    # 输出类别数
 T_MIN_INPUT = 0.0  # 输入编码时间下限
 T_MAX_INPUT = 1.0  # 输入编码时间上限
@@ -160,19 +160,19 @@ def plot_history(train_losses, test_losses, train_accuracies, test_accuracies):
     epochs = range(1, len(train_losses) + 1)
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
-    plt.plot(epochs, train_losses, 'bo-', label='训练损失')
-    plt.plot(epochs, test_losses, 'ro-', label='测试损失')
-    plt.title('损失曲线')
-    plt.xlabel('周期')
-    plt.ylabel('损失')
+    plt.plot(epochs, train_losses, 'bo-', label='Training Loss')
+    plt.plot(epochs, test_losses, 'ro-', label='Test Loss')
+    plt.title('Loss curve')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
     plt.legend()
     plt.grid(True)
     plt.subplot(1, 2, 2)
-    plt.plot(epochs, train_accuracies, 'bo-', label='训练准确率')
-    plt.plot(epochs, test_accuracies, 'ro-', label='测试准确率')
-    plt.title('准确率曲线')
-    plt.xlabel('周期')
-    plt.ylabel('准确率')
+    plt.plot(epochs, train_accuracies, 'bo-', label='Training Accuracy')
+    plt.plot(epochs, test_accuracies, 'ro-', label='Test Accuracy')
+    plt.title('Accuracy curve')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()

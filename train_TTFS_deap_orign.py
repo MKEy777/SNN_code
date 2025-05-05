@@ -17,7 +17,7 @@ from model.TTFS_ORIGN import SNNModel, SpikingDense
 # 配置参数
 FEATURE_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN_code\deap_features_NoFilter"
 INPUT_SIZE = 352
-HIDDEN_UNITS = [256, 128, 64]
+HIDDEN_UNITS = [256, 64]
 OUTPUT_SIZE = 2
 T_MIN_INPUT, T_MAX_INPUT = 0.0, 1.0
 LEARNING_RATE = 5e-4
@@ -133,19 +133,19 @@ def plot_history(tr_losses, te_losses, tr_accs, te_accs, label_name="Valence"):
     epochs = range(1, len(tr_losses) + 1)
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
-    plt.plot(epochs, tr_losses, 'bo-', label='训练损失')
-    plt.plot(epochs, te_losses, 'ro-', label='测试损失')
-    plt.title(f'{label_name} 损失')
-    plt.xlabel('轮次')
-    plt.ylabel('损失')
+    plt.plot(epochs, tr_losses, 'bo-', label='Training Loss')
+    plt.plot(epochs, te_losses, 'ro-', label='Test Loss')
+    plt.title('Loss curve')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
     plt.legend()
     plt.grid(True)
     plt.subplot(1, 2, 2)
-    plt.plot(epochs, tr_accs, 'bo-', label='训练准确率')
-    plt.plot(epochs, te_accs, 'ro-', label='测试准确率')
-    plt.title(f'{label_name} 准确率')
-    plt.xlabel('轮次')
-    plt.ylabel('准确率')
+    plt.plot(epochs, tr_accs, 'bo-', label='Training Accuracy')
+    plt.plot(epochs, te_accs, 'ro-', label='Test Accuracy')
+    plt.title('Accuracy curve')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
