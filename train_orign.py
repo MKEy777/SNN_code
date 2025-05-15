@@ -13,25 +13,25 @@ from typing import Dict, Union, List, Optional, Tuple
 import time
 import matplotlib.pyplot as plt
 
-# 导入模型定义 (假设在 model 子目录)
+
 from model.TTFS_ORIGN import SNNModel, SpikingDense
 
 # --- 参数设置 ---
 FEATURE_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\Individual_Features_NoBandpass_Fixed" # 特征文件目录
-INPUT_SIZE = 682 # 输入特征维度 (62通道 * 11特征/通道)
-HIDDEN_UNITS_1 = 256 # 第一个隐藏层单元数
-HIDDEN_UNITS_2 = 64 # 第二个隐藏层单元数
-OUTPUT_SIZE = 3    # 输出类别数
-T_MIN_INPUT = 0.0  # 输入编码时间下限
-T_MAX_INPUT = 1.0  # 输入编码时间上限
+INPUT_SIZE = 682 
+HIDDEN_UNITS_1 = 512 
+HIDDEN_UNITS_2 = 256
+OUTPUT_SIZE = 3    
+T_MIN_INPUT = 0.0  
+T_MAX_INPUT = 1.0  
 
-LEARNING_RATE = 5e-4 # 学习率
-BATCH_SIZE = 16      # 批处理大小
-NUM_EPOCHS = 100     # 训练周期数
-TEST_SPLIT_SIZE = 0.2 # 测试集比例
-RANDOM_SEED = 42     # 随机种子
+LEARNING_RATE = 5e-4 
+BATCH_SIZE = 8      
+NUM_EPOCHS = 150     
+TEST_SPLIT_SIZE = 0.2 
+RANDOM_SEED = 42     
 
-TRAINING_GAMMA = 10.0 # 动态时间调整参数
+TRAINING_GAMMA = 10.0 
 
 # --- 数据加载函数 ---
 def load_features_from_mat(feature_dir):

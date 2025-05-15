@@ -1,11 +1,8 @@
-# Import necessary libraries
 from scipy.io import loadmat, savemat
-# from scipy import signal # Not used in this version
 import numpy as np
 import os
-import re # Import regular expressions for parsing scene names
+import re 
 
-# Global parameters
 FIXED_LEN = 36001   # 200Hz * 180s + 1
 FS = 200            # Sampling rate, Hz
 WINDOW_S = 4        # Window length (seconds)
@@ -13,7 +10,7 @@ STEP_S = 2          # Step length (seconds)
 SKIP_S = 5          # Skip first 5 seconds
 
 # Specify output directory (Adjust if needed)
-OUTPUT_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\PerSession_MAT_NoBandpass_Fixed" # Changed output dir name
+OUTPUT_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\PerSession_MAT_NoBandpass_Fixed" 
 
 def load_and_pad(data_dir, fixed_len=FIXED_LEN, skip_s=SKIP_S, fs=FS):
     """
@@ -22,10 +19,6 @@ def load_and_pad(data_dir, fixed_len=FIXED_LEN, skip_s=SKIP_S, fs=FS):
     Returns: list of unique identifiers (subj_fname_scene), padded data list, label array, subject array, unique filename list
     """
     skip_len = int(skip_s * fs)
-    # Load labels from label.mat
-    # IMPORTANT: This assumes 'label.mat' exists in the SAME directory as the data files
-    # AND that it contains the labels corresponding to EACH data file being processed.
-    # If labels are separate per session/file, this loading logic needs adjustment.
     lbl_path = os.path.join(data_dir, "label.mat")
     if not os.path.exists(lbl_path):
         raise FileNotFoundError(f"Label file not found at: {lbl_path}. Ensure 'label.mat' is in the data directory.")
