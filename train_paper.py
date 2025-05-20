@@ -18,9 +18,9 @@ from model.TTFS_ORIGN import SNNModel, SpikingDense
 import itertools
 import copy
 
-# --- 固定参数设置 ---
+# --- Fixed Parameters ---
 FEATURE_DIR = r"C:\Users\VECTOR\Desktop\DeepLearning\SNN\SEED\Individual_Features_NoBandpass_Fixed_BaselineCorrected"
-OUTPUT_DIR_BASE = r"orign_result"
+OUTPUT_DIR_BASE = r"paper_result"
 INPUT_SIZE = 682
 OUTPUT_SIZE = 3
 T_MIN_INPUT = 0.0
@@ -30,11 +30,10 @@ RANDOM_SEED = 42
 TRAINING_GAMMA = 10.0
 NUM_EPOCHS = 150 
 LR_SCHEDULER_GAMMA = 0.99
-# --- 早停参数设置 ---
 EARLY_STOPPING_PATIENCE = 15
 EARLY_STOPPING_MIN_DELTA = 0.0005
 
-# --- 超参数搜索空间定义 ---
+# --- Hyperparameter Search Space ---
 hyperparameter_grid = {
     'LEARNING_RATE': [5e-4],
     'BATCH_SIZE': [8],
@@ -42,7 +41,7 @@ hyperparameter_grid = {
     'HIDDEN_UNITS_2': [256],
 }
 
-# 加载特征数据
+# Load feature data
 def load_features_from_mat(feature_dir):
     all_features = []
     all_labels = []
@@ -64,7 +63,7 @@ def load_features_from_mat(feature_dir):
     mapped_labels = np.array([label_mapping[lbl] for lbl in combined_labels_filtered], dtype=np.int64)
     return combined_features_filtered, mapped_labels
 
-# TTFS编码
+# TTFS encoding
 def ttfs_encode(features: np.ndarray, t_min: float, t_max: float) -> torch.Tensor:
     if isinstance(features, torch.Tensor):
         features = features.cpu().numpy()
@@ -72,7 +71,7 @@ def ttfs_encode(features: np.ndarray, t_min: float, t_max: float) -> torch.Tenso
     spike_times = t_max - features * (t_max - t_min)
     return torch.tensor(spike_times, dtype=torch.float32)
 
-# 数据集类
+# Dataset class
 class EncodedEEGDataset(Dataset):
     def __init__(self, encoded_features: torch.Tensor, labels: np.ndarray):
         self.features = encoded_features.to(dtype=torch.float32)
@@ -82,11 +81,8 @@ class EncodedEEGDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.features[idx], self.labels[idx]
 
+# Custom weight initialization
 def custom_weight_init(m: nn.Module):
-    """
-    自定义权重初始化: W ~ N(0, 1/N_in)
-    其中N_in是层的输入特征数量
-    """
     if isinstance(m, SpikingDense):
         if hasattr(m, 'kernel') and m.kernel is not None:
             input_dim_for_layer = m.kernel.shape[0]
@@ -95,7 +91,7 @@ def custom_weight_init(m: nn.Module):
                 with torch.no_grad():
                     m.kernel.data.normal_(mean=0.0, std=stddev)
 
-# 训练一个周期
+# Train one epoch
 def train_epoch(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
                 optimizer: optim.Optimizer, device: torch.device, epoch: int,
                 gamma_ttfs: float, current_t_min_input: float, current_t_max_input: float) -> Tuple[float, float]:
@@ -108,13 +104,13 @@ def train_epoch(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
         outputs, min_ti_list = model(features)
 
         primary_loss = criterion(outputs, labels)
-        loss = primary_loss  # No L1 regularization applied
+        loss = primary_loss
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # TTFS time parameter update logic
+        # Update time parameters as per the paper
         with torch.no_grad():
             current_t_min_prev_loop = torch.tensor(current_t_min_input, dtype=torch.float32, device=device)
             current_t_min_layer = torch.tensor(current_t_max_input, dtype=torch.float32, device=device)
@@ -129,16 +125,17 @@ def train_epoch(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
                             positive_spike_times = min_ti_list[k][min_ti_list[k] > 1e-6]
                             if positive_spike_times.numel() > 0:
                                 min_ti_for_layer = torch.min(positive_spike_times)
-                        base_interval = torch.tensor(1.0, dtype=torch.float32, device=device)
                         if min_ti_for_layer is not None:
-                             current_layer_t_max_for_gamma = layer.t_max.clone().detach()
-                             dynamic_term = gamma_ttfs * (current_layer_t_max_for_gamma - min_ti_for_layer)
-                             dynamic_term = torch.clamp(dynamic_term, min=0.0)
-                             new_t_max_layer = current_t_min_layer + torch.maximum(base_interval, dynamic_term)
+                            # Paper's update rule: t_max += max(gamma * (t_max - min_ti) - (t_max - t_min), 0)
+                            current_t_max = layer.t_max.clone().detach()
+                            current_t_min = layer.t_min.clone().detach()
+                            delta_t_max = gamma_ttfs * (current_t_max - min_ti_for_layer) - (current_t_max - current_t_min)
+                            delta_t_max = torch.clamp(delta_t_max, min=0.0)
+                            new_t_max_layer = current_t_max + delta_t_max
                         else:
-                             new_t_max_layer = current_t_min_layer + base_interval
+                            new_t_max_layer = layer.t_max.clone().detach()
                         k += 1
-                    else: # Output layer
+                    else:  # Output layer
                         new_t_max_layer = current_t_min_layer + torch.tensor(1.0, dtype=torch.float32, device=device)
                     layer.set_time_params(t_min_prev_layer, current_t_min_layer, new_t_max_layer)
                     t_min_prev_layer = current_t_min_layer.clone()
@@ -153,7 +150,7 @@ def train_epoch(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
     epoch_acc = correct_predictions / total_samples if total_samples > 0 else 0
     return epoch_loss, epoch_acc
 
-# 评估模型
+# Evaluate model
 def evaluate_model(model: SNNModel, dataloader: DataLoader, criterion: nn.Module,
                    device: torch.device) -> Tuple[float, float, List, List]:
     model.eval()
@@ -177,7 +174,7 @@ def evaluate_model(model: SNNModel, dataloader: DataLoader, criterion: nn.Module
     epoch_acc = correct_predictions / total_samples if total_samples > 0 else 0
     return epoch_loss, epoch_acc, all_labels, all_preds
 
-# 构建文件名前缀
+# Build filename prefix
 def build_filename_prefix(params: Dict[str, Union[int, float]]) -> str:
     lr_val = params.get('LEARNING_RATE', fixed_parameters.get('LEARNING_RATE'))
     lr_str = f"{lr_val:.0e}".replace('-', 'm').replace('+', '')
@@ -190,7 +187,7 @@ def build_filename_prefix(params: Dict[str, Union[int, float]]) -> str:
               f"_gammaTTFS{gamma_str}{lr_decay_gamma_str}_seed{params['RANDOM_SEED']}")
     return prefix
 
-# 绘制训练历史
+# Plot training history
 def plot_history(train_losses, val_losses, train_accuracies, val_accuracies, train_lrs, filename_prefix: str, save_dir: str, stopped_epoch: Optional[int] = None):
     epochs_range = range(1, len(train_losses) + 1)
     plt.figure(figsize=(18, 5))
@@ -216,7 +213,7 @@ def plot_history(train_losses, val_losses, train_accuracies, val_accuracies, tra
     plt.savefig(filename); plt.close()
     print(f"Training history and learning rate plot saved as {filename}")
 
-# 保存模型
+# Save model
 def save_model_torch(model: SNNModel, filename_prefix: str, save_dir: str):
     if not os.path.exists(save_dir): os.makedirs(save_dir, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -224,7 +221,7 @@ def save_model_torch(model: SNNModel, filename_prefix: str, save_dir: str):
     torch.save(model.state_dict(), save_path)
     print(f"Model successfully saved to: {save_path}")
 
-# 保存参数
+# Save parameters
 def save_params(params: Dict[str, Union[int, float, str]], filename_prefix: str, save_dir: str):
     if not os.path.exists(save_dir): os.makedirs(save_dir, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -240,7 +237,7 @@ def save_params(params: Dict[str, Union[int, float, str]], filename_prefix: str,
     with open(save_path, 'w') as f: json.dump(serializable_params, f, indent=4)
     print(f"Training parameters saved to: {save_path}")
 
-# --- 封装的训练和评估函数 ---
+# Training and evaluation function
 def run_training_session(current_hyperparams: Dict, fixed_params_dict: Dict, run_id: int):
     all_params = {**fixed_params_dict, **current_hyperparams}
 
@@ -318,7 +315,7 @@ def run_training_session(current_hyperparams: Dict, fixed_params_dict: Dict, run
     print(f"Total trainable parameters in model: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE_INITIAL)  # No L2 regularization
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE_INITIAL)
     scheduler = ExponentialLR(optimizer, gamma=_LR_SCHEDULER_GAMMA)
 
     with torch.no_grad():
