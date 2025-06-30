@@ -1,0 +1,55 @@
+// 模块: parallel_compute_engine 
+// 功能: 并行计算引擎，包含并行乘法器和加法树。
+// 
+`timescale 1ns / 1ps
+
+module parallel_compute_engine #(
+    parameter PARALLEL_FACTOR = 8,             // 并行计算通道数
+    parameter DATA_WIDTH      = 8,             // 输入和权重位宽
+    parameter ACC_WIDTH       = 32,            // 累加器输出位宽，防止溢出
+    // --- 【关键修复】移除参数的类型定义，使其符合Verilog-2001语法 ---
+    parameter INPUT_ZERO_POINT = 0             // 输入零点偏移（量化用）
+)(
+    input  wire signed [PARALLEL_FACTOR*DATA_WIDTH-1:0] parallel_inputs,  // 并行输入打包
+    input  wire signed [PARALLEL_FACTOR*DATA_WIDTH-1:0] parallel_weights, // 并行权重打包
+    output wire signed [ACC_WIDTH-1:0]                 sum_of_products     // 累加结果
+);
+
+    // 乘积存储数组
+    // --- 【修改点】在此处添加综合属性，强制使用DSP ---
+    (* use_dsp = "yes" *) 
+    wire signed [DATA_WIDTH*2+1:0] products [0:PARALLEL_FACTOR-1]; 
+
+    // 并行乘法单元生成
+    genvar i;
+    generate
+        for (i = 0; i < PARALLEL_FACTOR; i = i + 1) begin : parallel_mac_units 
+            // 将 sub_result_i 的位宽从9位扩大到10位
+            // DATA_WIDTH+2 = 10位，范围-512到511，足以容纳 -128 - 180 = -308
+            wire signed [DATA_WIDTH+1:0] sub_result_i;
+            // 提取第 i 路输入并转换为 signed，减去零点偏移
+            // $signed()会正确处理现在是 typeless 的 INPUT_ZERO_POINT
+            assign sub_result_i = $signed(parallel_inputs[i*DATA_WIDTH +: DATA_WIDTH])
+                                  - $signed(INPUT_ZERO_POINT); 
+            // 提取第 i 路权重并转换为 signed
+            assign products[i]   = sub_result_i * $signed(parallel_weights[i*DATA_WIDTH +: DATA_WIDTH]); 
+        end
+    endgenerate
+
+    // 加法树阶段
+    wire signed [ACC_WIDTH-1:0] sum_stage1 [0:PARALLEL_FACTOR/2-1]; 
+    wire signed [ACC_WIDTH-1:0] sum_stage2 [0:PARALLEL_FACTOR/4-1]; 
+    genvar s1, s2;
+    generate
+        for (s1 = 0; s1 < PARALLEL_FACTOR/2; s1 = s1 + 1) begin
+            assign sum_stage1[s1] = $signed(products[2*s1]) + $signed(products[2*s1+1]);
+        end
+        for (s2 = 0; s2 < PARALLEL_FACTOR/4; s2 = s2 + 1) begin
+            assign sum_stage2[s2] = $signed(sum_stage1[2*s2]) + $signed(sum_stage1[2*s2+1]); 
+        end
+    endgenerate
+
+    // 最终累加输出
+    assign sum_of_products = $signed(sum_stage2[0]) + $signed(sum_stage2[1]); 
+
+endmodule

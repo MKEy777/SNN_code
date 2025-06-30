@@ -1,0 +1,161 @@
+`timescale 1ns / 1ps
+
+module dense_layer #(
+    parameter PARALLEL_FACTOR    = 8,
+    parameter INPUT_SIZE        = 300,
+    parameter OUTPUT_SIZE       = 256,
+    parameter DATA_WIDTH        = 8,
+    parameter ACC_WIDTH         = 32,
+    parameter BIAS_WIDTH        = 32,
+    parameter WEIGHT_ROM_FILE   = "",
+    parameter BIAS_ROM_FILE     = "",
+    parameter signed [8:0]  INPUT_ZERO_POINT   = 0,
+    parameter signed [8:0]  OUTPUT_ZERO_POINT  = 180,
+    parameter signed [31:0] OUTPUT_MULTIPLIER  = 1198999149,
+    parameter               OUTPUT_SHIFT       = 11
+)(
+    input  wire                               clk,
+    input  wire                               rst_n,
+    input  wire                               i_valid,
+    output wire                               i_ready,
+    output wire                               o_valid,
+    input  wire                               o_ready,
+    input  wire signed [INPUT_SIZE*DATA_WIDTH-1:0]   i_spikes,
+    output wire signed [OUTPUT_SIZE*DATA_WIDTH-1:0]  o_spikes
+);
+
+    // 【最终修正】: 增加 FSM_LOAD 状态，将状态位宽改为3位
+    localparam FSM_IDLE         = 3'd0, FSM_LOAD = 3'd1, FSM_CALC = 3'd2, FSM_FINISH = 3'd3, FSM_DONE = 3'd4;
+    reg [2:0] current_state, next_state;
+
+    localparam WORDS_PER_NEURON = (INPUT_SIZE + PARALLEL_FACTOR - 1) / PARALLEL_FACTOR;
+    localparam ROM_ADDR_WIDTH   = clog2(OUTPUT_SIZE * WORDS_PER_NEURON);
+    
+    reg [clog2(INPUT_SIZE):0]    input_cnt;
+    reg [clog2(OUTPUT_SIZE)-1:0] output_cnt;
+    reg signed [DATA_WIDTH-1:0]             i_spikes_mem [0:INPUT_SIZE-1];
+    reg signed [OUTPUT_SIZE*DATA_WIDTH-1:0] o_spikes_reg;
+    reg signed [ACC_WIDTH-1:0]              accumulator_full;
+    reg signed [DATA_WIDTH*PARALLEL_FACTOR-1:0] parallel_input_data_reg;
+    
+    reg                                     pipeline_fill_cycle;
+    reg                                     is_first_accumulation;
+    wire signed [BIAS_WIDTH-1:0]                         bias_data;
+    wire signed [DATA_WIDTH*PARALLEL_FACTOR-1:0]        parallel_weight_data;
+    wire signed [DATA_WIDTH*PARALLEL_FACTOR-1:0]        parallel_input_data;
+    wire signed [ACC_WIDTH-1:0]                          sum_of_products;
+    wire signed [DATA_WIDTH-1:0]                         clamped_output;
+
+    wire is_last_mac_cycle = (input_cnt >= INPUT_SIZE);
+    wire is_last_neuron    = (output_cnt == OUTPUT_SIZE - 1);
+
+    assign i_ready  = (current_state == FSM_IDLE); // 只有在IDLE状态才准备好接收
+    assign o_valid  = (current_state == FSM_DONE);
+    assign o_spikes = o_spikes_reg;
+
+    parallel_compute_engine #(.PARALLEL_FACTOR(PARALLEL_FACTOR), .DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH), .INPUT_ZERO_POINT(INPUT_ZERO_POINT)) 
+        u_compute_engine (.parallel_inputs(parallel_input_data_reg), .parallel_weights(parallel_weight_data), .sum_of_products(sum_of_products));
+    quantization_unit #(.DATA_WIDTH(DATA_WIDTH), .ACC_WIDTH(ACC_WIDTH), .BIAS_WIDTH(BIAS_WIDTH), .OUTPUT_ZERO_POINT(OUTPUT_ZERO_POINT), .OUTPUT_MULTIPLIER(OUTPUT_MULTIPLIER), .OUTPUT_SHIFT(OUTPUT_SHIFT)) 
+        u_quant_unit (.accumulator_in(accumulator_full), .bias_in(bias_data), .clamped_output(clamped_output));
+    rom_sync #(.DATA_WIDTH(DATA_WIDTH*PARALLEL_FACTOR), .ADDR_WIDTH(ROM_ADDR_WIDTH), .MEM_FILE(WEIGHT_ROM_FILE)) 
+        weight_rom (.clk(clk), .addr(output_cnt * WORDS_PER_NEURON + (input_cnt / PARALLEL_FACTOR)), .data_out(parallel_weight_data));
+    rom_sync #(.DATA_WIDTH(BIAS_WIDTH), .ADDR_WIDTH(clog2(OUTPUT_SIZE)), .MEM_FILE(BIAS_ROM_FILE)) 
+        bias_rom (.clk(clk), .addr(output_cnt), .data_out(bias_data));
+
+    genvar k;
+    generate for (k = 0; k < PARALLEL_FACTOR; k = k + 1) begin
+        assign parallel_input_data[k*DATA_WIDTH +: DATA_WIDTH] = ((input_cnt + k) < INPUT_SIZE) ? i_spikes_mem[input_cnt + k] : 0;
+    end endgenerate
+
+    // 【最终修正】: 更新状态转移逻辑
+    always @(*) begin
+        next_state = current_state;
+        case (current_state)
+            FSM_IDLE:   if (i_valid) next_state = FSM_LOAD;
+            FSM_LOAD:   next_state = FSM_CALC; // 加载完成后，无条件进入计算
+            FSM_CALC:   if (is_last_mac_cycle) next_state = FSM_FINISH;
+            FSM_FINISH: if (is_last_neuron) next_state = FSM_DONE; else next_state = FSM_CALC;
+            FSM_DONE:   if (o_ready) next_state = FSM_IDLE;
+        endcase
+    end
+
+    integer j;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            current_state <= FSM_IDLE;
+            input_cnt <= 0; output_cnt <= 0;
+            accumulator_full <= 0;
+            o_spikes_reg <= 0;
+            parallel_input_data_reg <= 0;
+            pipeline_fill_cycle <= 1'b0;
+            is_first_accumulation <= 1'b0;
+        end else begin
+            current_state <= next_state;
+            parallel_input_data_reg <= parallel_input_data;
+
+            case (current_state)
+                FSM_IDLE: begin
+                    // 在IDLE状态，清零所有计数器和累加器，等待i_valid
+                    if (i_valid) begin
+                        input_cnt <= 0;
+                        output_cnt <= 0;
+                        accumulator_full <= 0;
+                        pipeline_fill_cycle <= 1'b1;
+                        is_first_accumulation <= 1'b1;
+                    end
+                end
+                
+                // 【最终修正】: 新增FSM_LOAD状态的逻辑
+                FSM_LOAD: begin
+                    // 在这个状态专门进行数据加载
+                    for (j = 0; j < INPUT_SIZE; j = j + 1) begin
+                        i_spikes_mem[j] <= i_spikes[j*DATA_WIDTH +: DATA_WIDTH];
+                    end
+                end
+
+                FSM_CALC: begin
+                    if (pipeline_fill_cycle) begin
+                        // 阶段1：流水线填充
+                    end else if (is_first_accumulation) begin
+                        // 阶段2：首次累加
+                        accumulator_full <= sum_of_products;
+                    end else begin
+                        // 阶段3：正常累加
+                        accumulator_full <= accumulator_full + sum_of_products;
+                    end
+                    
+                    pipeline_fill_cycle <= 1'b0;
+                    if (!pipeline_fill_cycle) begin
+                        is_first_accumulation <= 1'b0;
+                    end
+                    
+                    input_cnt <= input_cnt + PARALLEL_FACTOR;
+                end
+
+                FSM_FINISH: begin
+                    o_spikes_reg[output_cnt*DATA_WIDTH +: DATA_WIDTH] <= clamped_output;
+                    if (!is_last_neuron) begin
+                        output_cnt <= output_cnt + 1;
+                        input_cnt <= 0;
+                        accumulator_full <= 0;
+                        pipeline_fill_cycle <= 1'b1;
+                        is_first_accumulation <= 1'b1;
+                    end
+                end
+
+                FSM_DONE: begin
+                    if (o_ready) begin 
+                        input_cnt <= 0;
+                        output_cnt <= 0; 
+                    end
+                end
+            endcase
+        end
+    end
+    
+    function integer clog2;
+        input integer value;
+        begin value = value - 1; for (clog2 = 0; value > 0; clog2 = clog2 + 1) value = value >> 1; end
+    endfunction
+
+endmodule
