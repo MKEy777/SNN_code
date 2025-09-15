@@ -9,7 +9,7 @@ module spi_slave_rx #(
     input  wire sclk,
     input  wire mosi,
     input  wire cs,
-    output wire o_valid, // 【最终修正】: o_valid 由 reg 改为 wire，由组合逻辑驱动
+    output wire o_valid,
     input  wire i_ready,
     output wire signed [FEATURE_LENGTH*DATA_WIDTH-1:0] o_features
 );
@@ -25,8 +25,7 @@ module spi_slave_rx #(
 
     reg [1:0] current_state, next_state;
     
-    // 【最终修正】: 使用 assign 语句，让 o_valid 直接由当前状态决定。
-    // 只要状态机处于 FSM_DONE 状态，o_valid 就立刻、稳定地为高电平。
+
     assign o_valid = (current_state == FSM_DONE);
 
     genvar g;

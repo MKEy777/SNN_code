@@ -160,7 +160,6 @@ class SpikingDense(nn.Module):
 
             time_diff = t_min_dev - t_min_prev_dev
             safe_time_diff = torch.where(time_diff == 0, torch.tensor(EPSILON, device=current_device), time_diff)
-
             # 计算 alpha，基于 D_i
             alpha = self.D_i / safe_time_diff
 

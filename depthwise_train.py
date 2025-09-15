@@ -1,3 +1,5 @@
+# 文件名: CSNN_depthwise_random_split.py
+
 import os
 import glob
 import numpy as np
@@ -16,9 +18,10 @@ import json
 import itertools
 import copy
 
+# 从模型文件中导入我们需要的模块
 from model.TTFS import SNNModel, SpikingDense, DivisionFreeAnnToSnnEncoder
 
-# --- 深度可分离卷积模块的定义 ---
+# --- 【修改1】添加深度可分离卷积模块的定义 ---
 class DepthwiseSeparableConv(nn.Module):
     """
     支持步长的深度可分离卷积模块。
@@ -32,25 +35,22 @@ class DepthwiseSeparableConv(nn.Module):
         return self.pointwise(self.depthwise(x))
 
 # --- 核心配置 ---
-# 输入目录为SEED-IV特征目录
-FEATURE_DIR = r"Feature_PowerSpectrumEntropy_LDS_Smoothed_4x8x9_IV"
+FEATURE_DIR = r"Feature_PowerSpectrumEntropy_LDS_Smoothed_4x8x9_AllData" 
 TEST_SPLIT_SIZE = 0.2
-# 输出目录名以反映数据集和模型
-OUTPUT_DIR_BASE = f"SNN_Depthwise_RandomSplit_SEED_IV"
-# 输出类别数为4 (0:中性, 1:高兴, 2:悲伤, 3:恐惧)
-OUTPUT_SIZE = 4
+OUTPUT_DIR_BASE = f"1SNN_Depthwise_RandomSplit" 
+OUTPUT_SIZE = 3
 T_MIN_INPUT = 0.0
 T_MAX_INPUT = 1.0
 RANDOM_SEED = 42
 TRAINING_GAMMA = 10.0
-NUM_EPOCHS = 500
+NUM_EPOCHS = 300
 EARLY_STOPPING_PATIENCE = 30
 EARLY_STOPPING_MIN_DELTA = 0.0001
 
 # --- 超参数网格 ---
 hyperparameter_grid = {
     'LEARNING_RATE': [5e-4],
-    'CONV_CHANNELS': [[8, 16]],
+    'CONV_CHANNELS': [[8, 16]], 
     'LAMBDA_L2': [0],
     'DROPOUT_RATE': [0],
     'BATCH_SIZE': [8],
@@ -69,24 +69,20 @@ fixed_parameters_for_naming: Dict[str, Union[str, int, float]] = {
     'EARLY_STOPPING_MIN_DELTA': EARLY_STOPPING_MIN_DELTA
 }
 
-# --- 数据加载与模型函数 ---
+# --- 数据加载与模型函数 (保持不变) ---
 def load_features_from_mat(feature_dir: str) -> Tuple[np.ndarray, np.ndarray]:
-    # 更新为SEED-IV的特征文件名
-    fpath = os.path.join(feature_dir, "all_features_lds_smoothed.mat")
+    fpath = os.path.join(feature_dir, "all_features_lds_smoothed.mat") # 确保文件名正确
     print(f"Loading data from: {fpath}")
     if not os.path.exists(fpath):
         raise FileNotFoundError(f"Data file not found: {fpath}")
-
     mat_data = loadmat(fpath)
-    features = mat_data['features'].astype(np.float32)
-    labels = mat_data['labels'].flatten().astype(np.int64)
-
-    # SEED-IV的标签已经是 0,1,2,3，无需映射
-    print(f"Features loaded, shape: {features.shape}")
-    print(f"Labels loaded, shape: {labels.shape}")
-    print(f"Unique labels found: {np.unique(labels)}")
-
-    return features, labels
+    combined_features = mat_data['features'].astype(np.float32)
+    combined_labels = mat_data['labels'].flatten()
+    label_mapping = {-1: 0, 0: 1, 1: 2}
+    valid_labels_indices = np.isin(combined_labels, list(label_mapping.keys()))
+    features_filtered = combined_features[valid_labels_indices]
+    labels_mapped = np.array([label_mapping[lbl] for lbl in combined_labels[valid_labels_indices]], dtype=np.int64)
+    return features_filtered, labels_mapped
 
 class NumericalEEGDataset(Dataset):
     def __init__(self, features: torch.Tensor, labels: np.ndarray):
@@ -96,7 +92,8 @@ class NumericalEEGDataset(Dataset):
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.features[idx], self.labels[idx]
 
-# 其余辅助函数 (custom_weight_init, train_epoch, etc.) 保持不变，因为它们的设计是通用的
+# ... custom_weight_init, train_epoch, evaluate_model, build_filename_prefix, plot_history, save_model_torch ...
+# ... 这些函数都保持不变 ...
 def custom_weight_init(m: nn.Module):
     if isinstance(m, SpikingDense) and m.kernel is not None:
         input_dim = m.kernel.shape[0];
@@ -156,7 +153,7 @@ def evaluate_model(model: SNNModel, dataloader: DataLoader, criterion: nn.Module
 def build_filename_prefix(params: Dict[str, Any]) -> str:
     h1, h2 = params.get('HIDDEN_UNITS_1', 'h1NA'), params.get('HIDDEN_UNITS_2', 'h2NA')
     lr, bs = params.get('LEARNING_RATE', 'lrNA'), params.get('BATCH_SIZE', 'bsNA')
-    conv_channels_list = params.get('CONV_CHANNELS', []);
+    conv_channels_list = params.get('CONV_CHANNELS', []); 
     if conv_channels_list and isinstance(conv_channels_list[0], list): channels_to_join = conv_channels_list[0]
     else: channels_to_join = conv_channels_list
     conv_ch_str = "-".join(map(str, channels_to_join)); conv_k = params.get('CONV_KERNEL_SIZE', 'kNA')
@@ -195,21 +192,21 @@ def run_training_session(current_hyperparams: Dict, fixed_params_dict: Dict, run
     print(f"\n--- Starting Run ID: {run_id} ---")
     print(f"Current Hyperparameters: {json.dumps(current_hyperparams, indent=2)}")
     print(f"Output will be saved to: {run_specific_output_dir}")
-
+    
     # --- 3. 环境与设备 ---
     torch.manual_seed(all_params['RANDOM_SEED']); np.random.seed(all_params['RANDOM_SEED'])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == 'cuda': torch.cuda.manual_seed_all(all_params['RANDOM_SEED'])
     print(f"Using device: {device}")
-
+    
     # --- 4. 加载全部数据后随机划分 ---
     try:
         features_data, labels_data = load_features_from_mat(all_params['FEATURE_DIR'])
     except FileNotFoundError as e:
         print(e); return 0.0
-
-    print(f"Data loaded. Total samples: {len(features_data)}. Raw feature shape: {features_data.shape[1:]}")
-
+    
+    print(f"Data loaded. Total samples: {len(features_data)}. Raw feature shape: {features_data.shape[1:]}") 
+    
     X_train_full, X_val_full, y_train, y_val = train_test_split(
         features_data, labels_data, test_size=all_params['TEST_SPLIT_SIZE'],
         random_state=all_params['RANDOM_SEED'], stratify=labels_data
@@ -224,53 +221,53 @@ def run_training_session(current_hyperparams: Dict, fixed_params_dict: Dict, run
 
     # --- 5. 模型构建 ---
     model = SNNModel()
-    in_channels = 4 # 输入特征图的通道数 (4x8x9)
+    in_channels = 4
     ann_layers = []
-    strides = [2, 2]
-
-    # 使用 DepthwiseSeparableConv 构建卷积前端
+    strides = [1, 2] 
+    
+    # 【修改2】在模型构建中用 DepthwiseSeparableConv 替换 nn.Conv2d
     for i, out_channels in enumerate(CONV_CHANNELS_CONFIG):
         ann_layers.extend([
             DepthwiseSeparableConv(
-                in_channels,
-                out_channels,
-                kernel_size=CONV_KERNEL_SIZE_PARAM,
+                in_channels, 
+                out_channels, 
+                kernel_size=CONV_KERNEL_SIZE_PARAM, 
                 stride=strides[i]
             ),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         ])
         in_channels = out_channels
-
+    
     model.add(nn.Sequential(*ann_layers))
-
-    # 动态计算展平后的维度
+    
     with torch.no_grad():
         dummy_input = torch.randn(1, 4, 8, 9)
         cnn_part = nn.Sequential(*ann_layers)
         dummy_output = cnn_part(dummy_input)
         flattened_dim = dummy_output.numel()
-
+    
     print(f"Hybrid model (Depthwise Separable Conv) created. Flattened dimension before SNN: {flattened_dim}")
 
     model.add(DivisionFreeAnnToSnnEncoder(t_min=T_MIN_INPUT, t_max=T_MAX_INPUT))
     model.add(nn.Flatten())
     if DROPOUT_RATE > 0:
         model.add(nn.Dropout(p=DROPOUT_RATE))
-
+    
     model.add(SpikingDense(HIDDEN_UNITS_1, 'dense_1', input_dim=flattened_dim))
     model.add(SpikingDense(HIDDEN_UNITS_2, 'dense_2', input_dim=HIDDEN_UNITS_1))
     model.add(SpikingDense(all_params['OUTPUT_SIZE'], 'dense_output', input_dim=HIDDEN_UNITS_2, outputLayer=True))
-
+    
     model.apply(custom_weight_init)
     model.to(device)
     print(f"Total trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-
+    
     # --- 6. 优化器、损失函数和训练循环 ---
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE_INITIAL, weight_decay=lambda_l2)
-    scheduler = CosineAnnealingLR(optimizer, T_max=_MAX_NUM_EPOCHS, eta_min=1e-8)
-
+    scheduler = CosineAnnealingLR(optimizer, T_max=_MAX_NUM_EPOCHS, eta_min=1e-6)
+    
+    # ... (训练循环和后续代码保持不变) ...
     start_time_run = time.time()
     train_losses, val_losses, train_accuracies, val_accuracies, learning_rates = [], [], [], [], []
     best_val_acc, patience_counter, best_model_state_dict, stopped_epoch = 0.0, 0, None, _MAX_NUM_EPOCHS
@@ -297,11 +294,7 @@ def run_training_session(current_hyperparams: Dict, fixed_params_dict: Dict, run
     plot_history(train_losses, val_losses, train_accuracies, val_accuracies, learning_rates, files_internal_prefix, run_specific_output_dir, stopped_epoch)
     final_val_loss, final_val_acc, final_labels, final_preds = evaluate_model(model, val_loader, criterion, device)
     print(f"Final validation accuracy (from best model): {final_val_acc:.4f}")
-
-    # 更新分类报告的类别名称以匹配SEED-IV
-    report_target_names = ['Neutral (0)', 'Happy (1)', 'Sad (2)', 'Fear (3)']
-    report = classification_report(final_labels, final_preds, target_names=report_target_names, digits=4, zero_division=0)
-
+    report = classification_report(final_labels, final_preds, target_names=['Negative (0)', 'Neutral (1)', 'Positive (2)'], digits=4, zero_division=0)
     print("\nClassification Report (on validation set, using best model):"); print(report)
     report_filename = os.path.join(run_specific_output_dir, f"classification_report_{files_internal_prefix}.txt")
     with open(report_filename, 'w', encoding='utf-8') as f:
@@ -309,25 +302,47 @@ def run_training_session(current_hyperparams: Dict, fixed_params_dict: Dict, run
         f.write("Classification Report:\n"); f.write(report)
     print(f"Classification report saved to: {report_filename}")
     return best_val_acc
-
+    
 # --- 主程序入口 ---
 if __name__ == "__main__":
     if not os.path.exists(OUTPUT_DIR_BASE):
         os.makedirs(OUTPUT_DIR_BASE, exist_ok=True)
-
+    
     # 动态构建超参数组合
-    keys = hyperparameter_grid.keys()
-    values = hyperparameter_grid.values()
-    hyperparam_combinations = [dict(zip(keys, v)) for v in itertools.product(*values)]
+    keys, values = zip(*hyperparameter_grid.items())
+    
+    # 处理特殊配对的超参数，例如 HIDDEN_UNITS
+    h1_options = hyperparameter_grid.get('HIDDEN_UNITS_1', [])
+    h2_options = hyperparameter_grid.get('HIDDEN_UNITS_2', [])
+    
+    # 确保h1和h2的列表长度一致，以便配对
+    max_len = max(len(h1_options), len(h2_options))
+    h1_options_padded = h1_options + [h1_options[-1]] * (max_len - len(h1_options))
+    h2_options_padded = h2_options + [h2_options[-1]] * (max_len - len(h2_options))
+    snn_layer_combos = list(zip(h1_options_padded, h2_options_padded))
+
+    # 创建不包含这些特殊参数的基础组合
+    base_grid = {k: v for k, v in hyperparameter_grid.items() if k not in ['HIDDEN_UNITS_1', 'HIDDEN_UNITS_2']}
+    base_keys, base_values = zip(*base_grid.items())
+    base_combinations = [dict(zip(base_keys, v)) for v in itertools.product(*base_values)]
+    
+    # 将基础组合与特殊配对组合进行合并
+    hyperparam_combinations = []
+    for base_combo in base_combinations:
+        for h1, h2 in snn_layer_combos:
+            new_combo = base_combo.copy()
+            new_combo['HIDDEN_UNITS_1'] = h1
+            new_combo['HIDDEN_UNITS_2'] = h2
+            hyperparam_combinations.append(new_combo)
 
     num_combinations = len(hyperparam_combinations)
-
+    
     print(f"Starting grid search for {num_combinations} hyperparameter combination(s).")
-
+    
     best_accuracy_overall = 0.0
     best_hyperparams_combo_overall = None
     all_results_summary = []
-
+    
     for i, params_combo_iter in enumerate(hyperparam_combinations):
         validation_accuracy_for_run = run_training_session(
             current_hyperparams=params_combo_iter,
@@ -336,16 +351,16 @@ if __name__ == "__main__":
         )
         run_summary = { 'run_id': i+1, 'hyperparameters': params_combo_iter, 'best_validation_accuracy': validation_accuracy_for_run }
         all_results_summary.append(run_summary)
-
+        
         if validation_accuracy_for_run > best_accuracy_overall:
             best_accuracy_overall = validation_accuracy_for_run
             best_hyperparams_combo_overall = params_combo_iter
-
+    
     print("\n--- Grid Search Finished ---")
     if best_hyperparams_combo_overall:
         print(f"Best overall validation accuracy: {best_accuracy_overall:.4f}")
         print(f"Best hyperparameter combination: {json.dumps(best_hyperparams_combo_overall, indent=2)}")
-
+        
         summary_file_path = os.path.join(OUTPUT_DIR_BASE, f"grid_search_summary_{time.strftime('%Y%m%d_%H%M%S')}.json")
         summary_data = {
             "best_overall_validation_accuracy": best_accuracy_overall,
